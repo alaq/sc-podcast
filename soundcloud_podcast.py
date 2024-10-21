@@ -29,14 +29,21 @@ def create_podcast_xml(channel_info):
         pub_date = datetime.fromtimestamp(item.get("timestamp", 0)).strftime("%a, %d %b %Y %H:%M:%S GMT")
         ET.SubElement(entry, "pubDate").text = pub_date
         
-        enclosure = ET.SubElement(entry, "enclosure", url=item.get("url", ""), type="audio/mpeg")
+        # Find the HTTP MP3 format
+        mp3_url = ""
+        for format in item.get("formats", []):
+            if format.get("format_id") == "http_mp3_128":
+                mp3_url = format.get("url", "")
+                break
+
+        enclosure = ET.SubElement(entry, "enclosure", url=mp3_url, type="audio/mpeg")
         ET.SubElement(entry, "itunes:duration").text = str(int(item.get("duration", 0)))
 
     return ET.tostring(rss, encoding="unicode")
 
-@app.route('/<path:channel_name>')
-def get_podcast(channel_name):
-    url = f"https://soundcloud.com/{channel_name}"
+@app.route('/<path:channel_or_track>')
+def get_podcast(channel_or_track):
+    url = f"https://soundcloud.com/{channel_or_track}"
     
     ydl_opts = {
         'format': 'bestaudio/best',
@@ -47,6 +54,12 @@ def get_podcast(channel_name):
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         try:
             info = ydl.extract_info(url, download=False)
+            
+            # Check if it's a single track
+            if 'entries' not in info:
+                # Convert single track to a list with one item
+                info['entries'] = [info]
+            
             podcast_xml = create_podcast_xml(info)
             return Response(podcast_xml, mimetype='application/rss+xml')
         except Exception as e:

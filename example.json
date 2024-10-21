@@ -86,7 +86,7 @@
     "genre": "playa tech",
     "formats": [
         {
-            "url": "https://cf-hls-opus-media.sndcdn.com/playlist/b4d00590-a69b-4efd-9292-4310aca60f31.64.opus/playlist.m3u8?Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiKjovL2NmLWhscy1vcHVzLW1lZGlhLnNuZGNkbi5jb20vcGxheWxpc3QvYjRkMDA1OTAtYTY5Yi00ZWZkLTkyOTItNDMxMGFjYTYwZjMxLjY0Lm9wdXMvcGxheWxpc3QubTN1OCoiLCJDb25kaXRpb24iOnsiRGF0ZUxlc3NUaGFuIjp7IkFXUzpFcG9jaFRpbWUiOjE3Mjk0OTg4NTB9fX1dfQ__&Signature=XkE0WJ~bC9fr30kkIWj0aODkKJcCVsBlw5kNuwRB70gpppuvBXzBShsYbe-IG9ybf~YvoVRcbvLZxdY9ZofBN9-ccWAtDtYPFpCNrlQ0QUt-HrFLxcoAWNI3448qn55opoUANiAeXFu1iItfU6NtyF57H5U36uvzjhW0OWmIlxaZnfh6h1tlf9zX6EI~96QSDKGyNstSuOk5jegPdd-HUNgeiSi2-n30JSwwbO6V-iFGXZNMKEFER9g~OSEd69jYyrk5psRlTjfagH-oBedTbN1moixQJf2hecmUzmPiJDPZDcxGP9Pis0LiH6l6DcydauTbt4cyw8BVcrAm9foRTw__&Key-Pair-Id=APKAI6TU7MMXM5DG6EPQ",
+            "url": "https://cf-hls-opus-media.sndcdn.com/playlist/b4d00590-a69b-4efd-9292-4310aca60f31.64.opus/playlist.m3u8?Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiKjovL2NmLWhscy1vcHVzLW1lZGlhLnNuZGNkbi5jb20vcGxheWxpc3QvYjRkMDA1OTAtYTY5Yi00ZWZkLTkyOTItNDMxMGFjYTYwZjMxLjY0Lm9wdXMvcGxheWxpc3QubTN1OCoiLCJDb25kaXRpb24iOnsiRGF0ZUxlc3NUaGFuIjp7IkFXUzpFcG9jaFRpbWUiOjE3Mjk1Mzc1ODB9fX1dfQ__&Signature=Kw1Ydd5Vzbn8tFvV4iwWmgOSfE3HkRbvuIuK~tJRmU1w61ReIfR0NA7ki1xRVhkf8Wz5rAgyBthN4OpLA0hcbDqWBHZfrrtgpF~MlawjR65JOChtR5kxMHcVCQr8l4592Ghrum-8COQ85pptjBEeoizXZ9D3yAFOdoz66M3L2VKN4QZN0AT1Kx4ohrAW5k5ckd39-XjOVxdWJrcWQ9tBZR71SNiaCM7yhCEhF-ssOxKUJuVkWsWSdgghDlq-QdDH3V2jie-zhXkp1VtmsiXUIFDXbDwfGvh1OcoIsE1AgKnjLDCB-G2~2V-X0wOpZa0DJ2k8~ec-~cBKFg5Jq0l3eg__&Key-Pair-Id=APKAI6TU7MMXM5DG6EPQ",
             "ext": "opus",
             "abr": 64,
             "format_id": "hls_opus_64",
@@ -96,7 +96,7 @@
             "resolution": "audio only",
             "aspect_ratio": null,
             "http_headers": {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.85 Safari/537.36",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "en-us,en;q=0.5",
                 "Sec-Fetch-Mode": "navigate"
@@ -108,7 +108,7 @@
             "format": "hls_opus_64 - audio only"
         },
         {
-            "url": "https://cf-hls-media.sndcdn.com/playlist/6QNK4vQh32Nu.128.mp3/playlist.m3u8?Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiKjovL2NmLWhscy1tZWRpYS5zbmRjZG4uY29tL3BsYXlsaXN0LzZRTks0dlFoMzJOdS4xMjgubXAzL3BsYXlsaXN0Lm0zdTgqIiwiQ29uZGl0aW9uIjp7IkRhdGVMZXNzVGhhbiI6eyJBV1M6RXBvY2hUaW1lIjoxNzI5NDk4ODUwfX19XX0_&Signature=UpBc35QAyZ0Rd6E4e~SUKXL9NJ9QTlHzeDUUbCAgVM1uzPHkJ7FFxj27LFiucFmUkLG6G1-rwBFWxYmg7cHB9rg3JduZoDzSsKlmM31K3gW~JVLoC~o~Q74qQRnmuMv5zoIEsJQQOPd8JtJC~6tRegN43xIl4Z1e2V~fR1znrzgc45jzV-coOadatAeOdx9oESYtKKXi9VcNhydMae20~mOsQ4~McknJrqdw5opHivhwS~N~tecMzvJSz1ET6twWWQsxbGvCgRhaJFSfk2IPsw8u1iEkWl4SAs2U-psMUP78jPDAlHPzQLrqGVIm13wTIbxO3K5zWBkXyUsp5YdflA__&Key-Pair-Id=APKAI6TU7MMXM5DG6EPQ",
+            "url": "https://cf-hls-media.sndcdn.com/playlist/6QNK4vQh32Nu.128.mp3/playlist.m3u8?Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiKjovL2NmLWhscy1tZWRpYS5zbmRjZG4uY29tL3BsYXlsaXN0LzZRTks0dlFoMzJOdS4xMjgubXAzL3BsYXlsaXN0Lm0zdTgqIiwiQ29uZGl0aW9uIjp7IkRhdGVMZXNzVGhhbiI6eyJBV1M6RXBvY2hUaW1lIjoxNzI5NTM3NTgwfX19XX0_&Signature=KA3eENnagYnYp4Ehd9BQHZ5ECc7lpM3BRuJhJcB3qRPVZRUipRi-rRRy3ZH8fxP0hGCIuHCy1796fRGVELsuhmdpf0OQE5kjzkj0GWPGyr9UxABbSd25ALuuAkUCZmKJVLGm5mQm86Agsd6LU1bXq6py99dqxefdqoO~lPkE77XwlhvqTF7Q-Q1ttZF5PSNQqvahMgAuMJcGK92DM42wqKfyjIYMrYPJWzF-th7t3~A8JSIc5IY8vhgYT-Ntrj2Ebvm0Yd9s0s321rpZU9rP33cV~imQky6fI3WqHfbbTSZWZhWgbFMz0G0e17qVuyVyswgmTxdonB2iSPd94BMDBQ__&Key-Pair-Id=APKAI6TU7MMXM5DG6EPQ",
             "ext": "mp3",
             "abr": 128,
             "format_id": "hls_mp3_128",
@@ -118,7 +118,7 @@
             "resolution": "audio only",
             "aspect_ratio": null,
             "http_headers": {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.85 Safari/537.36",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "en-us,en;q=0.5",
                 "Sec-Fetch-Mode": "navigate"
@@ -130,7 +130,7 @@
             "format": "hls_mp3_128 - audio only"
         },
         {
-            "url": "https://cf-media.sndcdn.com/6QNK4vQh32Nu.128.mp3?Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiKjovL2NmLW1lZGlhLnNuZGNkbi5jb20vNlFOSzR2UWgzMk51LjEyOC5tcDMqIiwiQ29uZGl0aW9uIjp7IkRhdGVMZXNzVGhhbiI6eyJBV1M6RXBvY2hUaW1lIjoxNzI5NDk4ODUwfX19XX0_&Signature=KMKhsltN1Rb8A~CnBHB~X9FDdffBGREs6zxdwN1bhMMs2TMHXR4KlEMT9DQ25l4sCAgbVdEHjU5x1Pysioqlyt06QsBOmKekQbzJ0Gw6HNAQ9OTbwy0xWkWnDqJLlbuRMvqtS1LS0C-pMP9xomkK72PmfVBhyn~GGabXhZd5qvRw1tAwRCUEz3u70mUdOYKuhh7PC-tiCPjJELZfZPRBsE0mbacnrm~Yx-tE4pha7cDyPeqKGz-QDJIJ9yeHGUWiijYDOhm6oOp0DDFeIr2gPMyPzNOK8-SmHu7K40i5WZB2YWAlz5TZWAxRVA0Z8dYFE55bI2VhI2iuS7ha018vlA__&Key-Pair-Id=APKAI6TU7MMXM5DG6EPQ",
+            "url": "https://cf-media.sndcdn.com/6QNK4vQh32Nu.128.mp3?Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiKjovL2NmLW1lZGlhLnNuZGNkbi5jb20vNlFOSzR2UWgzMk51LjEyOC5tcDMqIiwiQ29uZGl0aW9uIjp7IkRhdGVMZXNzVGhhbiI6eyJBV1M6RXBvY2hUaW1lIjoxNzI5NTM3NTgwfX19XX0_&Signature=Lpa3zI7T34uS8bDkxTLK5NI9D12hFWVk7QoIfV~dBIKMP9YPkZXDxRxaCIkM4dWU7~h7zihrQ73ITxA-ruiyN4L9~Niq0Dm2YIXvuPJOBsfa9mUyH-VxqZDHye0g3L7jCQa5i133iiBfd7fcm5p2K37wSvw2pm~eaVa8nyIdxGBxeauNeeA72eU5773Gwrwo2XBIOf12YaB~GeH8bkqbxEAhCu~V7rnesfz0OgTK0IxQxO6ZpS~GsijnsBWegih-UCIA9-QA7Q2T6XLIiBqp7eXWdD3Va3ajYMTak17eKKEQVYCOeLbJOmL4tKisjsi~wacyZ~7OhAaBBHXKWjtEwg__&Key-Pair-Id=APKAI6TU7MMXM5DG6EPQ",
             "ext": "mp3",
             "abr": 128,
             "format_id": "http_mp3_128",
@@ -140,7 +140,7 @@
             "resolution": "audio only",
             "aspect_ratio": null,
             "http_headers": {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.85 Safari/537.36",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "en-us,en;q=0.5",
                 "Sec-Fetch-Mode": "navigate"
@@ -166,8 +166,8 @@
     "upload_date": "20241017",
     "requested_subtitles": null,
     "_has_drm": null,
-    "epoch": 1729485688,
-    "url": "https://cf-media.sndcdn.com/6QNK4vQh32Nu.128.mp3?Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiKjovL2NmLW1lZGlhLnNuZGNkbi5jb20vNlFOSzR2UWgzMk51LjEyOC5tcDMqIiwiQ29uZGl0aW9uIjp7IkRhdGVMZXNzVGhhbiI6eyJBV1M6RXBvY2hUaW1lIjoxNzI5NDk4ODUwfX19XX0_&Signature=KMKhsltN1Rb8A~CnBHB~X9FDdffBGREs6zxdwN1bhMMs2TMHXR4KlEMT9DQ25l4sCAgbVdEHjU5x1Pysioqlyt06QsBOmKekQbzJ0Gw6HNAQ9OTbwy0xWkWnDqJLlbuRMvqtS1LS0C-pMP9xomkK72PmfVBhyn~GGabXhZd5qvRw1tAwRCUEz3u70mUdOYKuhh7PC-tiCPjJELZfZPRBsE0mbacnrm~Yx-tE4pha7cDyPeqKGz-QDJIJ9yeHGUWiijYDOhm6oOp0DDFeIr2gPMyPzNOK8-SmHu7K40i5WZB2YWAlz5TZWAxRVA0Z8dYFE55bI2VhI2iuS7ha018vlA__&Key-Pair-Id=APKAI6TU7MMXM5DG6EPQ",
+    "epoch": 1729524418,
+    "url": "https://cf-media.sndcdn.com/6QNK4vQh32Nu.128.mp3?Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiKjovL2NmLW1lZGlhLnNuZGNkbi5jb20vNlFOSzR2UWgzMk51LjEyOC5tcDMqIiwiQ29uZGl0aW9uIjp7IkRhdGVMZXNzVGhhbiI6eyJBV1M6RXBvY2hUaW1lIjoxNzI5NTM3NTgwfX19XX0_&Signature=Lpa3zI7T34uS8bDkxTLK5NI9D12hFWVk7QoIfV~dBIKMP9YPkZXDxRxaCIkM4dWU7~h7zihrQ73ITxA-ruiyN4L9~Niq0Dm2YIXvuPJOBsfa9mUyH-VxqZDHye0g3L7jCQa5i133iiBfd7fcm5p2K37wSvw2pm~eaVa8nyIdxGBxeauNeeA72eU5773Gwrwo2XBIOf12YaB~GeH8bkqbxEAhCu~V7rnesfz0OgTK0IxQxO6ZpS~GsijnsBWegih-UCIA9-QA7Q2T6XLIiBqp7eXWdD3Va3ajYMTak17eKKEQVYCOeLbJOmL4tKisjsi~wacyZ~7OhAaBBHXKWjtEwg__&Key-Pair-Id=APKAI6TU7MMXM5DG6EPQ",
     "ext": "mp3",
     "abr": 128,
     "format_id": "http_mp3_128",
@@ -177,7 +177,7 @@
     "resolution": "audio only",
     "aspect_ratio": null,
     "http_headers": {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.85 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-us,en;q=0.5",
         "Sec-Fetch-Mode": "navigate"
