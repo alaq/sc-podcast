@@ -1,10 +1,8 @@
-from flask import Flask, Response
+from http.server import BaseHTTPRequestHandler
 import yt_dlp
 import xml.etree.ElementTree as ET
 from datetime import datetime
-import json
-
-app = Flask(__name__)
+from urllib.parse import urlparse, unquote
 
 def create_podcast_xml(channel_info):
     rss = ET.Element("rss", version="2.0", **{"xmlns:itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd"})
@@ -41,29 +39,35 @@ def create_podcast_xml(channel_info):
 
     return ET.tostring(rss, encoding="unicode")
 
-@app.route('/<path:channel_or_track>')
-def get_podcast(channel_or_track):
-    url = f"https://soundcloud.com/{channel_or_track}"
-    
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'extract_flat': 'in_playlist',
-        'dump_single_json': True,
-    }
-    
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+class handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        parsed_path = urlparse(self.path)
+        channel_or_track = unquote(parsed_path.path.strip('/'))
+        url = f"https://soundcloud.com/{channel_or_track}"
+        
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'extract_flat': 'in_playlist',
+            'dump_single_json': True,
+        }
+        
         try:
-            info = ydl.extract_info(url, download=False)
-            
-            # Check if it's a single track
-            if 'entries' not in info:
-                # Convert single track to a list with one item
-                info['entries'] = [info]
-            
-            podcast_xml = create_podcast_xml(info)
-            return Response(podcast_xml, mimetype='application/rss+xml')
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                
+                # Check if it's a single track
+                if 'entries' not in info:
+                    # Convert single track to a list with one item
+                    info['entries'] = [info]
+                
+                podcast_xml = create_podcast_xml(info)
+                
+                self.send_response(200)
+                self.send_header('Content-type', 'application/rss+xml')
+                self.end_headers()
+                self.wfile.write(podcast_xml.encode('utf-8'))
         except Exception as e:
-            return str(e), 400
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=3000)
+            self.send_response(400)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(str(e).encode('utf-8'))
