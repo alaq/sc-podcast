@@ -8,8 +8,6 @@ def create_podcast_xml(channel_info):
     rss = ET.Element("rss", version="2.0", **{"xmlns:itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd"})
     channel = ET.SubElement(rss, "channel")
 
-    print("channel_info", channel_info)
-
     # Channel information
     ET.SubElement(channel, "title").text = channel_info.get("uploader", "Unknown Channel")
     ET.SubElement(channel, "link").text = channel_info.get("uploader_url", "")
@@ -27,8 +25,6 @@ def create_podcast_xml(channel_info):
     # Set channel thumbnail
     if original_thumbnail:
         ET.SubElement(channel, "itunes:image", href=original_thumbnail)
-
-    print(len(channel_info.get("entries", [])))
 
     # Add items (tracks) to the channel
     for item in channel_info.get("entries", []):
@@ -50,9 +46,13 @@ def create_podcast_xml(channel_info):
         enclosure = ET.SubElement(entry, "enclosure", url=mp3_url, type="audio/mpeg")
         ET.SubElement(entry, "itunes:duration").text = str(int(item.get("duration", 0)))
 
-        # Set episode thumbnail (using the original channel thumbnail)
-        if original_thumbnail:
-            ET.SubElement(entry, "itunes:image", href=original_thumbnail)
+        thumbnail = ""
+        for thumbnail in item.get("thumbnails", []):
+            if thumbnail.get("id") == "original":
+                thumbnail = thumbnail.get("url", "")
+                break
+        if thumbnail:
+            ET.SubElement(entry, "itunes:image", href=thumbnail)
 
     return ET.tostring(rss, encoding="unicode")
 
