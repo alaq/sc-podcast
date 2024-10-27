@@ -95,7 +95,7 @@ class handler(BaseHTTPRequestHandler):
                 else:
                     # Fetch detailed information for each track in the channel
                     detailed_entries = []
-                    for entry in info['entries'][:10]:
+                    for entry in info['entries'][:5]:
                         track_url = entry['url']
                         detailed_entry = get_track_details(track_url)
                         detailed_entries.append(detailed_entry)
