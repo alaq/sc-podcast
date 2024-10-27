@@ -74,6 +74,8 @@ class handler(BaseHTTPRequestHandler):
 
         parsed_path = urlparse(self.path)
         channel_or_track = unquote(parsed_path.path.strip('/'))
+        if '/' not in channel_or_track:
+            channel_or_track += '/tracks'
         url = f"https://soundcloud.com/{channel_or_track}"
         
         ydl_opts = {
