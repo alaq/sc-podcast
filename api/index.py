@@ -7,6 +7,7 @@ from urllib.parse import urlparse, unquote
 def create_podcast_xml(channel_info):
     rss = ET.Element("rss", version="2.0", **{"xmlns:itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd"})
     channel = ET.SubElement(rss, "channel")
+    channel_thumbnail = ""
 
     # Channel information
     ET.SubElement(channel, "title").text = channel_info.get("uploader", "Unknown Channel")
@@ -14,17 +15,6 @@ def create_podcast_xml(channel_info):
     ET.SubElement(channel, "language").text = "en-us"
     ET.SubElement(channel, "itunes:author").text = channel_info.get("uploader", "Unknown Author")
     ET.SubElement(channel, "description").text = "SoundCloud channel podcast feed"
-
-    # Get the original thumbnail URL
-    original_thumbnail = ""
-    for thumbnail in channel_info.get("thumbnails", []):
-        if thumbnail.get("id") == "original":
-            original_thumbnail = thumbnail.get("url", "")
-            break
-
-    # Set channel thumbnail
-    if original_thumbnail:
-        ET.SubElement(channel, "itunes:image", href=original_thumbnail)
 
     # Add items (tracks) to the channel
     for item in channel_info.get("entries", []):
@@ -53,6 +43,9 @@ def create_podcast_xml(channel_info):
                 break
         if thumbnail:
             ET.SubElement(entry, "itunes:image", href=thumbnail)
+            if channel_thumbnail == "":
+                channel_thumbnail = thumbnail
+                ET.SubElement(channel, "itunes:image", href=thumbnail)
 
     return ET.tostring(rss, encoding="unicode")
 
@@ -74,14 +67,12 @@ class handler(BaseHTTPRequestHandler):
 
         parsed_path = urlparse(self.path)
         channel_or_track = unquote(parsed_path.path.strip('/'))
-        if '/' not in channel_or_track:
-            channel_or_track += '/tracks'
         url = f"https://soundcloud.com/{channel_or_track}"
         
         ydl_opts = {
             'format': 'bestaudio/best',
-            'extract_flat': 'in_playlist',
             'dump_single_json': True,
+            'playlistend': 5,
         }
         
         try:
@@ -92,14 +83,6 @@ class handler(BaseHTTPRequestHandler):
                 if 'entries' not in info:
                     # Convert single track to a list with one item
                     info['entries'] = [info]
-                else:
-                    # Fetch detailed information for each track in the channel
-                    detailed_entries = []
-                    for entry in info['entries'][:5]:
-                        track_url = entry['url']
-                        detailed_entry = get_track_details(track_url)
-                        detailed_entries.append(detailed_entry)
-                    info['entries'] = detailed_entries
                 
                 podcast_xml = create_podcast_xml(info)
                 
