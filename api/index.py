@@ -4,17 +4,101 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 from urllib.parse import urlparse, unquote, quote
 
+def get_channel_info(channel_url, ydl_opts):
+    """
+    Try to extract channel information by making a separate request to the channel page
+    """
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # Extract just the channel info without entries
+            channel_info = ydl.extract_info(channel_url, download=False, process=False)
+            return channel_info
+    except Exception:
+        return None
+
 def create_podcast_xml(channel_info, server_url):
     rss = ET.Element("rss", version="2.0", **{"xmlns:itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd"})
     channel = ET.SubElement(rss, "channel")
-    channel_thumbnail = ""
+    
+    # Get first entry to extract fallback information
+    first_entry = None
+    if channel_info.get("entries") and len(channel_info["entries"]) > 0:
+        first_entry = channel_info["entries"][0]
+    
+    # Extract channel information with better fallbacks
+    # Try to get channel name from multiple possible fields
+    channel_name = (
+        channel_info.get("title", "") or 
+        channel_info.get("playlist_title", "") or
+        channel_info.get("uploader", "") or
+        (first_entry.get("uploader", "") if first_entry else "") or
+        "Unknown Channel"
+    )
+    
+    # Try to get channel description
+    channel_description = (
+        channel_info.get("description", "") or
+        channel_info.get("playlist_description", "") or
+        channel_info.get("channel_description", "") or
+        f"Podcast feed for {channel_name}"
+    )
+    
+    # Try to get channel URL
+    channel_url = (
+        channel_info.get("webpage_url", "") or
+        channel_info.get("uploader_url", "") or
+        channel_info.get("channel_uploader_url", "") or
+        ""
+    )
+    
+    # Try to get channel author (uploader) with better fallbacks
+    channel_author = (
+        channel_info.get("uploader", "") or
+        channel_info.get("playlist_uploader", "") or
+        channel_info.get("channel_uploader", "") or
+        (first_entry.get("uploader", "") if first_entry else "") or
+        "Unknown Author"
+    )
 
     # Channel information
-    ET.SubElement(channel, "title").text = channel_info.get("uploader", "Unknown Channel")
-    ET.SubElement(channel, "link").text = channel_info.get("uploader_url", "")
+    ET.SubElement(channel, "title").text = channel_name
+    ET.SubElement(channel, "link").text = channel_url
     ET.SubElement(channel, "language").text = "en-us"
-    ET.SubElement(channel, "itunes:author").text = channel_info.get("uploader", "Unknown Author")
-    ET.SubElement(channel, "description").text = "SoundCloud channel podcast feed"
+    ET.SubElement(channel, "itunes:author").text = channel_author
+    ET.SubElement(channel, "description").text = channel_description
+    
+    # Try to get channel artwork from multiple sources
+    channel_artwork = ""
+    
+    # Check if there are channel-level thumbnails
+    if "thumbnails" in channel_info and channel_info["thumbnails"]:
+        for thumb in channel_info["thumbnails"]:
+            if thumb.get("url"):
+                channel_artwork = thumb["url"]
+                break
+    
+    # Also check for channel thumbnails we might have extracted separately
+    if not channel_artwork and "channel_thumbnails" in channel_info:
+        for thumb in channel_info["channel_thumbnails"]:
+            if thumb.get("url"):
+                channel_artwork = thumb["url"]
+                break
+    
+    # If still no artwork, try to get it from the first entry
+    if not channel_artwork and first_entry and first_entry.get("thumbnails"):
+        for thumb in first_entry["thumbnails"]:
+            if thumb.get("id") == "original":
+                channel_artwork = thumb.get("url", "")
+                break
+        # If no original, get the largest/last thumbnail
+        if not channel_artwork:
+            thumbnails = first_entry.get("thumbnails", [])
+            if thumbnails:
+                channel_artwork = thumbnails[-1].get("url", "")
+    
+    # If we found channel artwork, add it
+    if channel_artwork:
+        ET.SubElement(channel, "itunes:image", href=channel_artwork)
 
     # Add items (tracks) to the channel
     for item in channel_info.get("entries", []):
@@ -38,16 +122,22 @@ def create_podcast_xml(channel_info, server_url):
             enclosure = ET.SubElement(entry, "enclosure", url=server_track_url, type="audio/mpeg")
             ET.SubElement(entry, "itunes:duration").text = str(int(item.get("duration", 0)))
 
-        thumbnail = ""
+        # Get track artwork
+        track_thumbnail = ""
         for thumbnail in item.get("thumbnails", []):
             if thumbnail.get("id") == "original":
-                thumbnail = thumbnail.get("url", "")
+                track_thumbnail = thumbnail.get("url", "")
                 break
-        if thumbnail:
-            ET.SubElement(entry, "itunes:image", href=thumbnail)
-            if channel_thumbnail == "":
-                channel_thumbnail = thumbnail
-                ET.SubElement(channel, "itunes:image", href=thumbnail)
+        
+        # If no original thumbnail, try to get the largest one
+        if not track_thumbnail and item.get("thumbnails"):
+            # Sort thumbnails by size (if available) or take the last one
+            thumbnails = item.get("thumbnails", [])
+            if thumbnails:
+                track_thumbnail = thumbnails[-1].get("url", "")
+        
+        if track_thumbnail:
+            ET.SubElement(entry, "itunes:image", href=track_thumbnail)
 
     return ET.tostring(rss, encoding="unicode")
 
@@ -121,7 +211,7 @@ class handler(BaseHTTPRequestHandler):
         url = f"https://soundcloud.com/{channel_or_track}"
         
         # Get server URL for generating proper links
-        server_url = f"http://{self.headers.get('Host', 'localhost')}"
+        server_url = f"https://{self.headers.get('Host', 'localhost')}"
         
         ydl_opts = {
             'format': 'bestaudio/best',
@@ -137,6 +227,36 @@ class handler(BaseHTTPRequestHandler):
                 if 'entries' not in info:
                     # Convert single track to a list with one item
                     info['entries'] = [info]
+                
+                # Try to get better channel information if we're missing key details
+                if not info.get('description') and not info.get('thumbnails'):
+                    # Extract the channel URL from the current URL
+                    channel_url = f"https://soundcloud.com/{channel_or_track.split('/')[0]}"
+                    
+                    # Try to get channel info separately
+                    channel_info = get_channel_info(channel_url, ydl_opts)
+                    if channel_info:
+                        # Merge channel info with playlist info
+                        info['channel_description'] = channel_info.get('description', '')
+                        info['channel_thumbnails'] = channel_info.get('thumbnails', [])
+                        info['channel_uploader'] = channel_info.get('uploader', '')
+                        info['channel_uploader_url'] = channel_info.get('uploader_url', '')
+                
+                # Debug: Print available fields in channel info (only in development)
+                # You can uncomment these lines to see what fields are available
+                # print("Channel info keys:", list(info.keys()))
+                # print("Channel title:", info.get('title'))
+                # print("Channel description:", info.get('description'))
+                # print("Channel uploader:", info.get('uploader'))
+                # print("Channel webpage_url:", info.get('webpage_url'))
+                # print("Channel thumbnails:", info.get('thumbnails'))
+                # print("Channel playlist_uploader:", info.get('playlist_uploader'))
+                # print("Channel uploader_id:", info.get('uploader_id'))
+                # print("Channel uploader_url:", info.get('uploader_url'))
+                # if info.get('entries') and len(info['entries']) > 0:
+                #     print("First entry keys:", list(info['entries'][0].keys()))
+                #     print("First entry uploader:", info['entries'][0].get('uploader'))
+                #     print("First entry thumbnails:", info['entries'][0].get('thumbnails'))
                 
                 podcast_xml = create_podcast_xml(info, server_url)
                 
