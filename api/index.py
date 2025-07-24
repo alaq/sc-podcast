@@ -3,6 +3,70 @@ import yt_dlp
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from urllib.parse import urlparse, unquote, quote
+import requests
+import json
+import os
+import time
+
+# Vercel KV configuration
+VERCEL_KV_REST_API_URL = os.environ.get('KV_REST_API_URL')
+VERCEL_KV_REST_API_TOKEN = os.environ.get('KV_REST_API_TOKEN')
+
+def get_kv_key(feed_path, track_id):
+    """Generate a unique key for a track in a specific feed"""
+    return f"feed:{feed_path}:track:{track_id}"
+
+def get_track_first_seen_time(feed_path, track_id):
+    """Get the timestamp when this track was first seen in this feed"""
+    if not VERCEL_KV_REST_API_URL or not VERCEL_KV_REST_API_TOKEN:
+        return None
+    
+    try:
+        key = get_kv_key(feed_path, track_id)
+        headers = {
+            'Authorization': f'Bearer {VERCEL_KV_REST_API_TOKEN}',
+            'Content-Type': 'application/json'
+        }
+        
+        response = requests.get(f'{VERCEL_KV_REST_API_URL}/get/{key}', headers=headers)
+        
+        if response.status_code == 200:
+            data = response.json()
+            return data.get('result')
+        elif response.status_code == 404:
+            # Key doesn't exist, this is the first time we see this track
+            return None
+        else:
+            print(f"Error fetching from KV: {response.status_code} - {response.text}")
+            return None
+    except Exception as e:
+        print(f"Error accessing Vercel KV: {e}")
+        return None
+
+def set_track_first_seen_time(feed_path, track_id, timestamp):
+    """Store the timestamp when this track was first seen in this feed"""
+    if not VERCEL_KV_REST_API_URL or not VERCEL_KV_REST_API_TOKEN:
+        return False
+    
+    try:
+        key = get_kv_key(feed_path, track_id)
+        headers = {
+            'Authorization': f'Bearer {VERCEL_KV_REST_API_TOKEN}',
+            'Content-Type': 'application/json'
+        }
+        
+        data = {'value': timestamp}
+        response = requests.post(f'{VERCEL_KV_REST_API_URL}/set/{key}', 
+                               headers=headers, json=data)
+        
+        if response.status_code == 200:
+            return True
+        else:
+            print(f"Error storing to KV: {response.status_code} - {response.text}")
+            return False
+    except Exception as e:
+        print(f"Error storing to Vercel KV: {e}")
+        return False
 
 def get_channel_info(channel_url, ydl_opts):
     """
@@ -16,7 +80,19 @@ def get_channel_info(channel_url, ydl_opts):
     except Exception:
         return None
 
-def create_podcast_xml(channel_info, server_url):
+def should_use_smart_timestamps(feed_path):
+    """
+    Determine if we should use smart timestamps (KV storage) for this feed type.
+    Only applies to likes, reposts, and playlists/sets, not regular tracks.
+    """
+    return (
+        '/likes' in feed_path or 
+        '/reposts' in feed_path or 
+        '/sets/' in feed_path or
+        feed_path.endswith('/sets')
+    )
+
+def create_podcast_xml(channel_info, server_url, feed_path):
     rss = ET.Element("rss", version="2.0", **{"xmlns:itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd"})
     channel = ET.SubElement(rss, "channel")
     
@@ -107,7 +183,33 @@ def create_podcast_xml(channel_info, server_url):
         ET.SubElement(entry, "itunes:author").text = item.get("uploader", "Unknown Author")
         ET.SubElement(entry, "description").text = item.get("description", "")
         
-        pub_date = datetime.fromtimestamp(item.get("timestamp", 0)).strftime("%a, %d %b %Y %H:%M:%S GMT")
+        # Determine publication date based on feed type
+        if should_use_smart_timestamps(feed_path):
+            # For likes, reposts, and playlists/sets: use smart timestamp tracking
+            track_id = item.get("id", "") or item.get("webpage_url", "")
+            
+            # Get the first seen time for this track in this feed
+            first_seen_time = None
+            if track_id:
+                first_seen_time = get_track_first_seen_time(feed_path, track_id)
+                
+                # If we haven't seen this track before, store the current time
+                if first_seen_time is None:
+                    current_time = int(time.time())
+                    set_track_first_seen_time(feed_path, track_id, current_time)
+                    first_seen_time = current_time
+            
+            # Use the first seen time for the feed, or fall back to current time (now)
+            if first_seen_time:
+                pub_date = datetime.fromtimestamp(first_seen_time).strftime("%a, %d %b %Y %H:%M:%S GMT")
+            else:
+                # Fallback to current time if KV is unavailable or track_id is missing
+                current_time = int(time.time())
+                pub_date = datetime.fromtimestamp(current_time).strftime("%a, %d %b %Y %H:%M:%S GMT")
+        else:
+            # For regular tracks: use the original track publication timestamp
+            pub_date = datetime.fromtimestamp(item.get("timestamp", 0)).strftime("%a, %d %b %Y %H:%M:%S GMT")
+        
         ET.SubElement(entry, "pubDate").text = pub_date
         
         # Generate server URL for this track instead of extracting MP3 URL
@@ -258,7 +360,7 @@ class handler(BaseHTTPRequestHandler):
                 #     print("First entry uploader:", info['entries'][0].get('uploader'))
                 #     print("First entry thumbnails:", info['entries'][0].get('thumbnails'))
                 
-                podcast_xml = create_podcast_xml(info, server_url)
+                podcast_xml = create_podcast_xml(info, server_url, channel_or_track)
                 
                 self.send_response(200)
                 self.send_header('Content-type', 'application/rss+xml')
