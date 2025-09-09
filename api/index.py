@@ -126,15 +126,51 @@ def create_podcast_xml(channel_info, server_url, feed_path):
         channel_info.get("channel_uploader_url", "") or
         ""
     )
+
+    print("channel_info:")
+    # Debug: Let's see all available keys to find the account name
+    print("Available channel_info keys:", list(channel_info.keys()))
+    print("Available channel_info values:")
+    for key in ['title', 'uploader', 'uploader_id', 'uploader_url', 'playlist_uploader', 'channel_uploader', 'channel', 'channel_id', 'channel_url', 'id', 'display_id']:
+        value = channel_info.get(key, "")
+        print(f"  {key}: '{value}'")
+    
+    if first_entry:
+        print("First entry keys:", list(first_entry.keys()))
+        print("First entry uploader info:")
+        for key in ['uploader', 'uploader_id', 'uploader_url', 'channel', 'channel_id', 'channel_url']:
+            value = first_entry.get(key, "")
+            print(f"  {key}: '{value}'")
     
     # Try to get channel author (uploader) with better fallbacks
-    channel_author = (
-        channel_info.get("uploader", "") or
-        channel_info.get("playlist_uploader", "") or
-        channel_info.get("channel_uploader", "") or
-        (first_entry.get("uploader", "") if first_entry else "") or
-        "Unknown Author"
-    )
+    # Extract account name from channel title
+    raw_channel_name = channel_info.get("title", "")
+    if raw_channel_name:
+        # Special case: "kado (Likes)" becomes "ACS"
+        if raw_channel_name == "kado (Likes)":
+            channel_author = "ACS"
+        # Remove (Tracks) suffix if present
+        elif raw_channel_name.endswith(" (Tracks)"):
+            channel_author = raw_channel_name[:-len(" (Tracks)")].strip()
+        # Otherwise use the name as is
+        else:
+            channel_author = raw_channel_name.strip()
+        
+        # Fallback to "Unknown Author" if somehow empty
+        if not channel_author:
+            channel_author = "Unknown Author"
+        
+        print(f"Extracted account name: '{raw_channel_name}' -> '{channel_author}'")
+    else:
+        # Fallback to original logic if no title
+        channel_author = (
+            channel_info.get("uploader", "") or
+            channel_info.get("playlist_uploader", "") or
+            channel_info.get("channel_uploader", "") or
+            (first_entry.get("uploader", "") if first_entry else "") or
+            "Unknown Author"
+        )
+        print(f"Using fallback channel_author: '{channel_author}'")
 
     # Channel information
     ET.SubElement(channel, "title").text = channel_name
