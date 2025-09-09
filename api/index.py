@@ -144,37 +144,41 @@ def create_podcast_xml(channel_info, server_url, feed_path):
     ET.SubElement(channel, "description").text = channel_description
     
     # Try to get channel artwork from multiple sources
-    channel_artwork = ""
+    # channel_artwork = ""
+    # 
+    # # Check if there are channel-level thumbnails
+    # if "thumbnails" in channel_info and channel_info["thumbnails"]:
+    #     for thumb in channel_info["thumbnails"]:
+    #         if thumb.get("url"):
+    #             channel_artwork = thumb["url"]
+    #             break
+    # 
+    # # Also check for channel thumbnails we might have extracted separately
+    # if not channel_artwork and "channel_thumbnails" in channel_info:
+    #     for thumb in channel_info["channel_thumbnails"]:
+    #         if thumb.get("url"):
+    #             channel_artwork = thumb["url"]
+    #             break
+    # 
+    # # If still no artwork, try to get it from the first entry
+    # if not channel_artwork and first_entry and first_entry.get("thumbnails"):
+    #     for thumb in first_entry["thumbnails"]:
+    #         if thumb.get("id") == "original":
+    #             channel_artwork = thumb.get("url", "")
+    #             break
+    #     # If no original, get the largest/last thumbnail
+    #     if not channel_artwork:
+    #         thumbnails = first_entry.get("thumbnails", [])
+    #         if thumbnails:
+    #             channel_artwork = thumbnails[-1].get("url", "")
+    # 
+    # # If we found channel artwork, add it
+    # if channel_artwork:
+    #     ET.SubElement(channel, "itunes:image", href=channel_artwork)
     
-    # Check if there are channel-level thumbnails
-    if "thumbnails" in channel_info and channel_info["thumbnails"]:
-        for thumb in channel_info["thumbnails"]:
-            if thumb.get("url"):
-                channel_artwork = thumb["url"]
-                break
-    
-    # Also check for channel thumbnails we might have extracted separately
-    if not channel_artwork and "channel_thumbnails" in channel_info:
-        for thumb in channel_info["channel_thumbnails"]:
-            if thumb.get("url"):
-                channel_artwork = thumb["url"]
-                break
-    
-    # If still no artwork, try to get it from the first entry
-    if not channel_artwork and first_entry and first_entry.get("thumbnails"):
-        for thumb in first_entry["thumbnails"]:
-            if thumb.get("id") == "original":
-                channel_artwork = thumb.get("url", "")
-                break
-        # If no original, get the largest/last thumbnail
-        if not channel_artwork:
-            thumbnails = first_entry.get("thumbnails", [])
-            if thumbnails:
-                channel_artwork = thumbnails[-1].get("url", "")
-    
-    # If we found channel artwork, add it
-    if channel_artwork:
-        ET.SubElement(channel, "itunes:image", href=channel_artwork)
+    # Use static channel artwork
+    channel_artwork_url = f"{server_url}/channel.png"
+    ET.SubElement(channel, "itunes:image", href=channel_artwork_url)
 
     # Add items (tracks) to the channel
     for item in channel_info.get("entries", []):
@@ -225,21 +229,25 @@ def create_podcast_xml(channel_info, server_url, feed_path):
             ET.SubElement(entry, "itunes:duration").text = str(int(item.get("duration", 0)))
 
         # Get track artwork
-        track_thumbnail = ""
-        for thumbnail in item.get("thumbnails", []):
-            if thumbnail.get("id") == "original":
-                track_thumbnail = thumbnail.get("url", "")
-                break
+        # track_thumbnail = ""
+        # for thumbnail in item.get("thumbnails", []):
+        #     if thumbnail.get("id") == "original":
+        #         track_thumbnail = thumbnail.get("url", "")
+        #         break
+        # 
+        # # If no original thumbnail, try to get the largest one
+        # if not track_thumbnail and item.get("thumbnails"):
+        #     # Sort thumbnails by size (if available) or take the last one
+        #     thumbnails = item.get("thumbnails", [])
+        #     if thumbnails:
+        #         track_thumbnail = thumbnails[-1].get("url", "")
+        # 
+        # if track_thumbnail:
+        #     ET.SubElement(entry, "itunes:image", href=track_thumbnail)
         
-        # If no original thumbnail, try to get the largest one
-        if not track_thumbnail and item.get("thumbnails"):
-            # Sort thumbnails by size (if available) or take the last one
-            thumbnails = item.get("thumbnails", [])
-            if thumbnails:
-                track_thumbnail = thumbnails[-1].get("url", "")
-        
-        if track_thumbnail:
-            ET.SubElement(entry, "itunes:image", href=track_thumbnail)
+        # Use static episode artwork
+        episode_artwork_url = f"{server_url}/episode.png"
+        ET.SubElement(entry, "itunes:image", href=episode_artwork_url)
 
     return ET.tostring(rss, encoding="unicode")
 
@@ -249,6 +257,36 @@ class handler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
             return
+        
+        # Handle static PNG files
+        if self.path == '/channel.png' or self.path == '/episode.png':
+            filename = self.path[1:]  # Remove leading slash
+            try:
+                # Get the directory where this script is located
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                file_path = os.path.join(script_dir, filename)
+                
+                with open(file_path, 'rb') as f:
+                    content = f.read()
+                
+                self.send_response(200)
+                self.send_header('Content-type', 'image/png')
+                self.send_header('Content-length', str(len(content)))
+                self.end_headers()
+                self.wfile.write(content)
+                return
+            except FileNotFoundError:
+                self.send_response(404)
+                self.send_header('Content-type', 'text/plain')
+                self.end_headers()
+                self.wfile.write(f'File {filename} not found'.encode('utf-8'))
+                return
+            except Exception as e:
+                self.send_response(500)
+                self.send_header('Content-type', 'text/plain')
+                self.end_headers()
+                self.wfile.write(f'Error serving {filename}: {str(e)}'.encode('utf-8'))
+                return
 
         parsed_path = urlparse(self.path)
         path_parts = parsed_path.path.strip('/').split('/')
@@ -305,8 +343,11 @@ class handler(BaseHTTPRequestHandler):
         # Handle playlist/channel requests (original behavior)
         channel_or_track = unquote(parsed_path.path.strip('/'))
         
+        # If no path is provided, default to kado-nyc/likes
+        if not channel_or_track:
+            channel_or_track = "kado-nyc/likes"
         # If it's just a username (no /tracks, /likes, etc.), default to /tracks
-        if '/' not in channel_or_track:
+        elif '/' not in channel_or_track:
             # It's just a username, append /tracks to get their tracks by default
             channel_or_track = f"{channel_or_track}/tracks"
         
