@@ -176,8 +176,8 @@ def create_podcast_xml(channel_info, server_url, feed_path):
     # if channel_artwork:
     #     ET.SubElement(channel, "itunes:image", href=channel_artwork)
     
-    # Use static channel artwork with unique URL
-    channel_artwork_url = f"{server_url}/channel.png?feed={feed_path.replace('/', '_')}"
+    # Use static channel artwork
+    channel_artwork_url = f"{server_url}/art.png"
     ET.SubElement(channel, "itunes:image", href=channel_artwork_url)
 
     # Add items (tracks) to the channel
@@ -228,27 +228,22 @@ def create_podcast_xml(channel_info, server_url, feed_path):
             enclosure = ET.SubElement(entry, "enclosure", url=server_track_url, type="audio/mpeg")
             ET.SubElement(entry, "itunes:duration").text = str(int(item.get("duration", 0)))
 
-        # Get track artwork
-        # track_thumbnail = ""
-        # for thumbnail in item.get("thumbnails", []):
-        #     if thumbnail.get("id") == "original":
-        #         track_thumbnail = thumbnail.get("url", "")
-        #         break
-        # 
-        # # If no original thumbnail, try to get the largest one
-        # if not track_thumbnail and item.get("thumbnails"):
-        #     # Sort thumbnails by size (if available) or take the last one
-        #     thumbnails = item.get("thumbnails", [])
-        #     if thumbnails:
-        #         track_thumbnail = thumbnails[-1].get("url", "")
-        # 
-        # if track_thumbnail:
-        #     ET.SubElement(entry, "itunes:image", href=track_thumbnail)
+        # Get track artwork from SoundCloud
+        track_thumbnail = ""
+        for thumbnail in item.get("thumbnails", []):
+            if thumbnail.get("id") == "original":
+                track_thumbnail = thumbnail.get("url", "")
+                break
         
-        # Use static episode artwork with unique URL to help podcast clients recognize different episodes
-        track_id = item.get("id", "") or item.get("webpage_url", "").split('/')[-1] or "unknown"
-        episode_artwork_url = f"{server_url}/episode.png?id={track_id}"
-        ET.SubElement(entry, "itunes:image", href=episode_artwork_url)
+        # If no original thumbnail, try to get the largest one
+        if not track_thumbnail and item.get("thumbnails"):
+            # Sort thumbnails by size (if available) or take the last one
+            thumbnails = item.get("thumbnails", [])
+            if thumbnails:
+                track_thumbnail = thumbnails[-1].get("url", "")
+        
+        if track_thumbnail:
+            ET.SubElement(entry, "itunes:image", href=track_thumbnail)
 
     return ET.tostring(rss, encoding="unicode")
 
@@ -260,7 +255,7 @@ class handler(BaseHTTPRequestHandler):
             return
         
         # Handle static PNG files (with or without query parameters)
-        if self.path.startswith('/channel.png') or self.path.startswith('/episode.png'):
+        if self.path.startswith('/art.png'):
             filename = self.path.split('?')[0][1:]  # Remove leading slash and query params
             try:
                 # Get the directory where this script is located
@@ -325,7 +320,6 @@ class handler(BaseHTTPRequestHandler):
                                 break
                     
                     if audio_url:
-                        # Redirect to the actual audio URL
                         self.send_response(302)
                         self.send_header('Location', audio_url)
                         self.end_headers()
