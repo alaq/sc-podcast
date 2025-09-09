@@ -176,8 +176,8 @@ def create_podcast_xml(channel_info, server_url, feed_path):
     # if channel_artwork:
     #     ET.SubElement(channel, "itunes:image", href=channel_artwork)
     
-    # Use static channel artwork
-    channel_artwork_url = f"{server_url}/channel.png"
+    # Use static channel artwork with unique URL
+    channel_artwork_url = f"{server_url}/channel.png?feed={feed_path.replace('/', '_')}"
     ET.SubElement(channel, "itunes:image", href=channel_artwork_url)
 
     # Add items (tracks) to the channel
@@ -245,8 +245,9 @@ def create_podcast_xml(channel_info, server_url, feed_path):
         # if track_thumbnail:
         #     ET.SubElement(entry, "itunes:image", href=track_thumbnail)
         
-        # Use static episode artwork
-        episode_artwork_url = f"{server_url}/episode.png"
+        # Use static episode artwork with unique URL to help podcast clients recognize different episodes
+        track_id = item.get("id", "") or item.get("webpage_url", "").split('/')[-1] or "unknown"
+        episode_artwork_url = f"{server_url}/episode.png?id={track_id}"
         ET.SubElement(entry, "itunes:image", href=episode_artwork_url)
 
     return ET.tostring(rss, encoding="unicode")
@@ -258,9 +259,9 @@ class handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         
-        # Handle static PNG files
-        if self.path == '/channel.png' or self.path == '/episode.png':
-            filename = self.path[1:]  # Remove leading slash
+        # Handle static PNG files (with or without query parameters)
+        if self.path.startswith('/channel.png') or self.path.startswith('/episode.png'):
+            filename = self.path.split('?')[0][1:]  # Remove leading slash and query params
             try:
                 # Get the directory where this script is located
                 script_dir = os.path.dirname(os.path.abspath(__file__))
