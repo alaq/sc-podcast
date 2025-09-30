@@ -9,6 +9,7 @@ import os
 import time
 from pathlib import Path
 import re
+from html import unescape
 
 
 def _load_local_env():
@@ -215,7 +216,45 @@ def format_entry_title(item, feed_path):
 
     return f"{uploader} - {raw_title}"
 
-def create_podcast_xml(channel_info, server_url, feed_path):
+
+def fetch_og_image_url(source_url):
+    """Fetch the Open Graph image URL for the given SoundCloud page."""
+    if not source_url:
+        return None
+
+    try:
+        headers = {
+            'User-Agent': (
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) '
+                'Chrome/124.0 Safari/537.36'
+            )
+        }
+        response = requests.get(source_url, timeout=6, headers=headers)
+        if response.status_code != 200:
+            return None
+
+        html_text = response.text
+        for attribute in ('property', 'name'):
+            pattern = re.compile(
+                rf'<meta[^>]*{attribute}\s*=\s*["\']og:image["\'][^>]*>',
+                re.IGNORECASE
+            )
+            match = pattern.search(html_text)
+            if not match:
+                continue
+
+            tag = match.group(0)
+            content_match = re.search(r'content\s*=\s*["\']([^"\']+)["\']', tag, re.IGNORECASE)
+            if content_match:
+                return unescape(content_match.group(1).strip())
+
+        return None
+    except Exception:
+        return None
+
+
+def create_podcast_xml(channel_info, server_url, feed_path, source_url):
     rss = ET.Element("rss", version="2.0", **{"xmlns:itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd"})
     channel = ET.SubElement(rss, "channel")
     
@@ -335,8 +374,8 @@ def create_podcast_xml(channel_info, server_url, feed_path):
     # if channel_artwork:
     #     ET.SubElement(channel, "itunes:image", href=channel_artwork)
     
-    # Use static channel artwork
-    channel_artwork_url = f"{server_url}/art.png"
+    # Prefer OG-image from the SoundCloud page, fallback to static art
+    channel_artwork_url = fetch_og_image_url(source_url) or f"{server_url}/art.png"
     ET.SubElement(channel, "itunes:image", href=channel_artwork_url)
 
     # Add items (tracks) to the channel
@@ -556,7 +595,7 @@ class handler(BaseHTTPRequestHandler):
                 #     print("First entry uploader:", info['entries'][0].get('uploader'))
                 #     print("First entry thumbnails:", info['entries'][0].get('thumbnails'))
                 
-                podcast_xml = create_podcast_xml(info, server_url, channel_or_track)
+                podcast_xml = create_podcast_xml(info, server_url, channel_or_track, url)
                 
                 self.send_response(200)
                 self.send_header('Content-type', 'application/rss+xml')
