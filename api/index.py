@@ -16,6 +16,11 @@ def get_kv_key(feed_path, track_id):
     """Generate a unique key for a track in a specific feed"""
     return f"feed:{feed_path}:track:{track_id}"
 
+
+def encode_kv_key(key):
+    """Encode KV keys so we can safely use them in Upstash REST paths"""
+    return quote(key, safe='')
+
 def get_track_first_seen_time(feed_path, track_id):
     """Get the timestamp when this track was first seen in this feed"""
     if not VERCEL_KV_REST_API_URL or not VERCEL_KV_REST_API_TOKEN:
@@ -23,16 +28,25 @@ def get_track_first_seen_time(feed_path, track_id):
     
     try:
         key = get_kv_key(feed_path, track_id)
+        encoded_key = encode_kv_key(key)
         headers = {
             'Authorization': f'Bearer {VERCEL_KV_REST_API_TOKEN}',
             'Content-Type': 'application/json'
         }
-        
-        response = requests.get(f'{VERCEL_KV_REST_API_URL}/get/{key}', headers=headers)
-        
+
+        response = requests.get(f'{VERCEL_KV_REST_API_URL}/get/{encoded_key}', headers=headers)
+
         if response.status_code == 200:
             data = response.json()
-            return data.get('result')
+            result = data.get('result')
+            if result is None:
+                return None
+
+            try:
+                return int(result)
+            except (TypeError, ValueError):
+                print(f"Unexpected KV result type for key {key}: {result}")
+                return None
         elif response.status_code == 404:
             # Key doesn't exist, this is the first time we see this track
             return None
@@ -50,13 +64,14 @@ def set_track_first_seen_time(feed_path, track_id, timestamp):
     
     try:
         key = get_kv_key(feed_path, track_id)
+        encoded_key = encode_kv_key(key)
         headers = {
             'Authorization': f'Bearer {VERCEL_KV_REST_API_TOKEN}',
             'Content-Type': 'application/json'
         }
-        
-        data = {'value': timestamp}
-        response = requests.post(f'{VERCEL_KV_REST_API_URL}/set/{key}', 
+
+        data = {'value': str(timestamp)}
+        response = requests.post(f'{VERCEL_KV_REST_API_URL}/set/{encoded_key}', 
                                headers=headers, json=data)
         
         if response.status_code == 200:
@@ -240,7 +255,7 @@ def create_podcast_xml(channel_info, server_url, feed_path):
                     first_seen_time = current_time
             
             # Use the first seen time for the feed, or fall back to current time (now)
-            if first_seen_time:
+            if first_seen_time is not None:
                 pub_date = datetime.fromtimestamp(first_seen_time).strftime("%a, %d %b %Y %H:%M:%S GMT")
             else:
                 # Fallback to current time if KV is unavailable or track_id is missing
