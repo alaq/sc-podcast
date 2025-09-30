@@ -8,6 +8,7 @@ import json
 import os
 import time
 from pathlib import Path
+import re
 
 
 def _load_local_env():
@@ -167,6 +168,53 @@ def should_use_smart_timestamps(feed_path):
         feed_path.endswith('/sets')
     )
 
+
+def is_tracks_feed(feed_path):
+    """Check whether the current feed path refers to a tracks feed."""
+    if not feed_path:
+        return False
+
+    normalized = feed_path.split('?', 1)[0].rstrip('/').lower()
+    return normalized.endswith('/tracks')
+
+
+def title_contains_uploader(raw_title, uploader):
+    """Detect if the uploader name already appears within the title."""
+    if not raw_title or not uploader:
+        return False
+
+    if uploader.casefold() not in raw_title.casefold():
+        return False
+
+    boundary_pattern = re.compile(rf"(?<![A-Za-z0-9]){re.escape(uploader)}(?![A-Za-z0-9])", re.IGNORECASE)
+    return bool(boundary_pattern.search(raw_title))
+
+
+def format_entry_title(item, feed_path):
+    """Format the RSS item title based on feed type and uploader name."""
+    raw_title = (item.get("title") or "Unknown Title").strip()
+
+    if is_tracks_feed(feed_path):
+        return raw_title or "Unknown Title"
+
+    uploader = (item.get("uploader") or "").strip()
+    if not uploader:
+        return raw_title or "Unknown Title"
+
+    # Strip noisy "<uploader> uploaded" prefixes that appear in likes/reposts feeds
+    prefix = f"{uploader} uploaded "
+    if raw_title.lower().startswith(prefix.lower()):
+        raw_title = raw_title[len(prefix):].lstrip()
+
+    if not raw_title:
+        return f"{uploader} - Unknown Title"
+
+    # Avoid duplicating the uploader if it's already present
+    if title_contains_uploader(raw_title, uploader):
+        return raw_title
+
+    return f"{uploader} - {raw_title}"
+
 def create_podcast_xml(channel_info, server_url, feed_path):
     rss = ET.Element("rss", version="2.0", **{"xmlns:itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd"})
     channel = ET.SubElement(rss, "channel")
@@ -294,7 +342,8 @@ def create_podcast_xml(channel_info, server_url, feed_path):
     # Add items (tracks) to the channel
     for item in channel_info.get("entries", []):
         entry = ET.SubElement(channel, "item")
-        ET.SubElement(entry, "title").text = item.get("title", "Unknown Title")
+        formatted_title = format_entry_title(item, feed_path)
+        ET.SubElement(entry, "title").text = formatted_title
         ET.SubElement(entry, "itunes:author").text = item.get("uploader", "Unknown Author")
         ET.SubElement(entry, "description").text = item.get("description", "")
         
