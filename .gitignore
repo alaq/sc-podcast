@@ -2,3 +2,6 @@
 venv/
 api/__pycache__
 
+# env
+.env*
+

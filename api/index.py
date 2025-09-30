@@ -7,6 +7,30 @@ import requests
 import json
 import os
 import time
+from pathlib import Path
+
+
+def _load_local_env():
+    """Best-effort loader for a project-level .env when running locally"""
+    env_path = Path(__file__).resolve().parent.parent / '.env'
+    if not env_path.exists():
+        return
+
+    for raw_line in env_path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+
+        key, value = line.split('=', 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+
+        # Do not overwrite pre-existing env vars (e.g. when running on Vercel)
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_local_env()
 
 # Vercel KV configuration
 VERCEL_KV_REST_API_URL = os.environ.get('KV_REST_API_URL')
@@ -34,6 +58,18 @@ def get_track_first_seen_time(feed_path, track_id):
         if isinstance(raw_value, (int, float)):
             return int(raw_value)
 
+        if isinstance(raw_value, dict):
+            for candidate_key in ('value', 'result'):
+                if candidate_key in raw_value:
+                    nested = _coerce_timestamp(raw_value[candidate_key])
+                    if nested is not None:
+                        return nested
+            # If nested lookup fails, fall back to any scalar-looking values
+            for nested_value in raw_value.values():
+                nested = _coerce_timestamp(nested_value)
+                if nested is not None:
+                    return nested
+
         if isinstance(raw_value, str):
             cleaned = raw_value.strip()
 
@@ -51,10 +87,11 @@ def get_track_first_seen_time(feed_path, track_id):
                 parsed = json.loads(cleaned)
                 if isinstance(parsed, (int, float)):
                     return int(parsed)
+                if isinstance(parsed, dict):
+                    return _coerce_timestamp(parsed)
             except (TypeError, ValueError, json.JSONDecodeError):
                 pass
 
-        print(f"Unexpected KV result type for key {feed_path}:{track_id} -> {raw_value}")
         return None
 
     try:
