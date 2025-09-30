@@ -25,7 +25,38 @@ def get_track_first_seen_time(feed_path, track_id):
     """Get the timestamp when this track was first seen in this feed"""
     if not VERCEL_KV_REST_API_URL or not VERCEL_KV_REST_API_TOKEN:
         return None
-    
+
+    def _coerce_timestamp(raw_value):
+        """Convert KV value into an integer timestamp if possible"""
+        if raw_value is None:
+            return None
+
+        if isinstance(raw_value, (int, float)):
+            return int(raw_value)
+
+        if isinstance(raw_value, str):
+            cleaned = raw_value.strip()
+
+            # Handle values that come back wrapped in extra quotes
+            if cleaned.startswith('"') and cleaned.endswith('"') and len(cleaned) >= 2:
+                cleaned = cleaned[1:-1]
+
+            try:
+                return int(float(cleaned))
+            except (TypeError, ValueError):
+                pass
+
+            # As a last resort, attempt to parse JSON payloads
+            try:
+                parsed = json.loads(cleaned)
+                if isinstance(parsed, (int, float)):
+                    return int(parsed)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+
+        print(f"Unexpected KV result type for key {feed_path}:{track_id} -> {raw_value}")
+        return None
+
     try:
         key = get_kv_key(feed_path, track_id)
         encoded_key = encode_kv_key(key)
@@ -38,15 +69,7 @@ def get_track_first_seen_time(feed_path, track_id):
 
         if response.status_code == 200:
             data = response.json()
-            result = data.get('result')
-            if result is None:
-                return None
-
-            try:
-                return int(result)
-            except (TypeError, ValueError):
-                print(f"Unexpected KV result type for key {key}: {result}")
-                return None
+            return _coerce_timestamp(data.get('result'))
         elif response.status_code == 404:
             # Key doesn't exist, this is the first time we see this track
             return None
