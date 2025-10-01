@@ -388,8 +388,17 @@ def create_podcast_xml(channel_info, server_url, feed_path, source_url):
         formatted_title = format_entry_title(item, feed_path)
         ET.SubElement(entry, "title").text = formatted_title
         ET.SubElement(entry, "itunes:author").text = item.get("uploader", "Unknown Author")
-        ET.SubElement(entry, "description").text = item.get("description", "")
-        
+        track_url = (item.get("webpage_url") or "").strip()
+
+        description_text = item.get("description") or ""
+        if track_url and track_url not in description_text:
+            if description_text.strip():
+                description_text = f"{description_text.rstrip()}\n\n{track_url}"
+            else:
+                description_text = track_url
+
+        ET.SubElement(entry, "description").text = description_text
+
         # Determine publication date based on feed type
         if should_use_smart_timestamps(feed_path):
             # For likes, reposts, and playlists/sets: use smart timestamp tracking
@@ -420,7 +429,6 @@ def create_podcast_xml(channel_info, server_url, feed_path, source_url):
         ET.SubElement(entry, "pubDate").text = pub_date
         
         # Generate server URL for this track instead of extracting MP3 URL
-        track_url = item.get("webpage_url", "")
         if track_url:
             # Extract the track path from the SoundCloud URL
             parsed_track = urlparse(track_url)
