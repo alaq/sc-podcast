@@ -272,6 +272,9 @@ def create_podcast_xml(channel_info, server_url, feed_path, source_url):
         (first_entry.get("uploader", "") if first_entry else "") or
         "Unknown Channel"
     )
+
+    if feed_path == "kado-nyc/likes":
+        channel_name = "ACSv3"
     
     # Try to get channel description
     channel_description = (
@@ -345,41 +348,11 @@ def create_podcast_xml(channel_info, server_url, feed_path, source_url):
     ET.SubElement(channel, "itunes:author").text = channel_author
     ET.SubElement(channel, "description").text = channel_description
     
-    # Try to get channel artwork from multiple sources
-    # channel_artwork = ""
-    # 
-    # # Check if there are channel-level thumbnails
-    # if "thumbnails" in channel_info and channel_info["thumbnails"]:
-    #     for thumb in channel_info["thumbnails"]:
-    #         if thumb.get("url"):
-    #             channel_artwork = thumb["url"]
-    #             break
-    # 
-    # # Also check for channel thumbnails we might have extracted separately
-    # if not channel_artwork and "channel_thumbnails" in channel_info:
-    #     for thumb in channel_info["channel_thumbnails"]:
-    #         if thumb.get("url"):
-    #             channel_artwork = thumb["url"]
-    #             break
-    # 
-    # # If still no artwork, try to get it from the first entry
-    # if not channel_artwork and first_entry and first_entry.get("thumbnails"):
-    #     for thumb in first_entry["thumbnails"]:
-    #         if thumb.get("id") == "original":
-    #             channel_artwork = thumb.get("url", "")
-    #             break
-    #     # If no original, get the largest/last thumbnail
-    #     if not channel_artwork:
-    #         thumbnails = first_entry.get("thumbnails", [])
-    #         if thumbnails:
-    #             channel_artwork = thumbnails[-1].get("url", "")
-    # 
-    # # If we found channel artwork, add it
-    # if channel_artwork:
-    #     ET.SubElement(channel, "itunes:image", href=channel_artwork)
-    
     # Prefer OG-image from the SoundCloud page, fallback to static art
-    channel_artwork_url = fetch_og_image_url(source_url) or f"{server_url}/art.png"
+    if feed_path == "kado-nyc/likes":
+        channel_artwork_url = f"{server_url}/art.png"
+    else:
+        channel_artwork_url = fetch_og_image_url(source_url) or f"{server_url}/art.png"
     ET.SubElement(channel, "itunes:image", href=channel_artwork_url)
 
     # Add items (tracks) to the channel
