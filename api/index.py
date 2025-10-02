@@ -170,6 +170,15 @@ def should_use_smart_timestamps(feed_path):
     )
 
 
+def is_default_feed(feed_path):
+    """Detect the special default feed that requires bespoke overrides."""
+    if not feed_path:
+        return False
+
+    normalized = feed_path.split('?', 1)[0].rstrip('/').lower()
+    return normalized == 'kado-nyc/likes'
+
+
 def is_tracks_feed(feed_path):
     """Check whether the current feed path refers to a tracks feed."""
     if not feed_path:
@@ -273,7 +282,7 @@ def create_podcast_xml(channel_info, server_url, feed_path, source_url):
         "Unknown Channel"
     )
 
-    if feed_path == "kado-nyc/likes":
+    if is_default_feed(feed_path):
         channel_name = "ACSv3"
     
     # Try to get channel description
@@ -292,26 +301,10 @@ def create_podcast_xml(channel_info, server_url, feed_path, source_url):
         ""
     )
 
-    print("channel_info:")
-    # Debug: Let's see all available keys to find the account name
-    print("Available channel_info keys:", list(channel_info.keys()))
-    print("Available channel_info values:")
-    for key in ['title', 'uploader', 'uploader_id', 'uploader_url', 'playlist_uploader', 'channel_uploader', 'channel', 'channel_id', 'channel_url', 'id', 'display_id']:
-        value = channel_info.get(key, "")
-        print(f"  {key}: '{value}'")
-    
-    if first_entry:
-        print("First entry keys:", list(first_entry.keys()))
-        print("First entry uploader info:")
-        for key in ['uploader', 'uploader_id', 'uploader_url', 'channel', 'channel_id', 'channel_url']:
-            value = first_entry.get(key, "")
-            print(f"  {key}: '{value}'")
-    
     # Try to get channel author (uploader) with better fallbacks
     # For the default feed, force the desired author label regardless of metadata
-    if feed_path == "kado-nyc/likes":
+    if is_default_feed(feed_path):
         channel_author = "ACSv3"
-        print("Default feed detected, overriding channel_author to 'ACSv3'")
     else:
         # Extract account name from channel title
         raw_channel_name = channel_info.get("title", "")
@@ -328,8 +321,6 @@ def create_podcast_xml(channel_info, server_url, feed_path, source_url):
             # Fallback to "Unknown Author" if somehow empty
             if not channel_author:
                 channel_author = "Unknown Author"
-            
-            print(f"Extracted account name: '{raw_channel_name}' -> '{channel_author}'")
         else:
             # Fallback to original logic if no title
             channel_author = (
@@ -339,7 +330,6 @@ def create_podcast_xml(channel_info, server_url, feed_path, source_url):
                 (first_entry.get("uploader", "") if first_entry else "") or
                 "Unknown Author"
             )
-            print(f"Using fallback channel_author: '{channel_author}'")
 
     # Channel information
     ET.SubElement(channel, "title").text = channel_name
@@ -349,7 +339,7 @@ def create_podcast_xml(channel_info, server_url, feed_path, source_url):
     ET.SubElement(channel, "description").text = channel_description
     
     # Prefer OG-image from the SoundCloud page, fallback to static art
-    if feed_path == "kado-nyc/likes":
+    if is_default_feed(feed_path):
         channel_artwork_url = f"{server_url}/art.png"
     else:
         channel_artwork_url = fetch_og_image_url(source_url) or f"{server_url}/art.png"
