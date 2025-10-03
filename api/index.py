@@ -1,7 +1,7 @@
 from http.server import BaseHTTPRequestHandler
 import yt_dlp
 import xml.etree.ElementTree as ET
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import urlparse, unquote, quote
 import requests
 import json
@@ -37,6 +37,28 @@ _load_local_env()
 # Vercel KV configuration
 VERCEL_KV_REST_API_URL = os.environ.get('KV_REST_API_URL')
 VERCEL_KV_REST_API_TOKEN = os.environ.get('KV_REST_API_TOKEN')
+
+TRACK_METADATA_PREFIX = 'track-metadata'
+TRACK_METADATA_VERSION = 'v1'
+TRACK_METADATA_FIELDS = (
+    'id',
+    'title',
+    'uploader',
+    'uploader_id',
+    'duration',
+    'timestamp',
+    'upload_date',
+    'release_timestamp',
+    'webpage_url',
+    'description',
+    'last_modified',
+    'thumbnails',
+)
+
+try:
+    DEFAULT_MAX_METADATA_REFRESHES = int(os.environ.get('MAX_TRACK_METADATA_REFRESHES', '5'))
+except (TypeError, ValueError):
+    DEFAULT_MAX_METADATA_REFRESHES = 5
 
 def get_kv_key(feed_path, track_id):
     """Generate a unique key for a track in a specific feed"""
@@ -145,6 +167,328 @@ def set_track_first_seen_time(feed_path, track_id, timestamp):
         print(f"Error storing to Vercel KV: {e}")
         return False
 
+
+def vercel_kv_available():
+    """Determine whether Vercel KV credentials are configured."""
+    return bool(VERCEL_KV_REST_API_URL and VERCEL_KV_REST_API_TOKEN)
+
+
+def _kv_headers():
+    return {
+        'Authorization': f'Bearer {VERCEL_KV_REST_API_TOKEN}',
+        'Content-Type': 'application/json'
+    }
+
+
+def _decode_kv_result(response):
+    """Decode a JSON payload returned by Vercel KV."""
+    try:
+        payload = response.json()
+    except (ValueError, json.JSONDecodeError):
+        return None
+
+    result = payload.get('result')
+
+    if isinstance(result, dict):
+        return result
+
+    if isinstance(result, (int, float)):
+        return result
+
+    if isinstance(result, str):
+        cleaned = result.strip()
+        if not cleaned:
+            return None
+        try:
+            return json.loads(cleaned)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return cleaned
+
+    return None
+
+
+def coerce_epoch_seconds(value):
+    """Attempt to convert various timestamp representations into epoch seconds."""
+    if value is None:
+        return None
+
+    if isinstance(value, (int, float)):
+        # Assume values that look like milliseconds are intended as seconds
+        if value > 10**12:
+            return int(value // 1000)
+        return int(value)
+
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+
+        # Raw integer-like string
+        if cleaned.isdigit():
+            numeric_value = int(cleaned)
+            if len(cleaned) == 13:  # milliseconds
+                return numeric_value // 1000
+            if len(cleaned) == 8:  # YYYYMMDD
+                try:
+                    dt = datetime.strptime(cleaned, '%Y%m%d')
+                    dt = dt.replace(tzinfo=timezone.utc)
+                    return int(dt.timestamp())
+                except ValueError:
+                    pass
+            return numeric_value
+
+        # ISO-8601-ish strings
+        iso_candidate = cleaned
+        if iso_candidate.endswith('Z'):
+            iso_candidate = f"{iso_candidate[:-1]}+00:00"
+
+        try:
+            dt = datetime.fromisoformat(iso_candidate)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return int(dt.timestamp())
+        except ValueError:
+            pass
+
+    return None
+
+
+def sanitize_track_metadata(raw_metadata):
+    """Reduce the yt_dlp metadata blob to the fields we care about."""
+    if not isinstance(raw_metadata, dict):
+        return None
+
+    sanitized = {}
+    for field in TRACK_METADATA_FIELDS:
+        if field not in raw_metadata:
+            continue
+        value = raw_metadata.get(field)
+        if value is None:
+            continue
+        if field == 'duration':
+            try:
+                sanitized[field] = int(value)
+            except (TypeError, ValueError):
+                continue
+        elif field == 'thumbnails' and isinstance(value, list):
+            cleaned_thumbnails = []
+            for thumb in value:
+                if not isinstance(thumb, dict):
+                    continue
+                url = thumb.get('url')
+                if not url:
+                    continue
+                cleaned_thumbnails.append({
+                    key: thumb.get(key)
+                    for key in ('id', 'url')
+                    if thumb.get(key) is not None
+                })
+            if cleaned_thumbnails:
+                sanitized[field] = cleaned_thumbnails
+        else:
+            sanitized[field] = value
+
+    if 'webpage_url' not in sanitized and raw_metadata.get('url'):
+        sanitized['webpage_url'] = raw_metadata.get('url')
+
+    return sanitized or None
+
+
+def get_track_metadata(track_id):
+    """Retrieve cached track metadata from Vercel KV."""
+    if not vercel_kv_available() or not track_id:
+        return None
+
+    key = encode_kv_key(f"{TRACK_METADATA_PREFIX}:{TRACK_METADATA_VERSION}:{track_id}")
+
+    try:
+        response = requests.get(f'{VERCEL_KV_REST_API_URL}/get/{key}', headers=_kv_headers())
+
+        if response.status_code == 200:
+            return _decode_kv_result(response)
+        if response.status_code == 404:
+            return None
+
+        print(f"Error fetching track metadata from KV: {response.status_code} - {response.text}")
+        return None
+    except Exception as exc:
+        print(f"Error accessing track metadata in Vercel KV: {exc}")
+        return None
+
+
+def set_track_metadata(track_id, payload):
+    """Persist sanitized track metadata to Vercel KV."""
+    if not vercel_kv_available() or not track_id or not payload:
+        return False
+
+    key = encode_kv_key(f"{TRACK_METADATA_PREFIX}:{TRACK_METADATA_VERSION}:{track_id}")
+
+    try:
+        response = requests.post(
+            f'{VERCEL_KV_REST_API_URL}/set/{key}',
+            headers=_kv_headers(),
+            json={'value': json.dumps(payload)}
+        )
+
+        if response.status_code == 200:
+            return True
+
+        print(f"Error storing track metadata to KV: {response.status_code} - {response.text}")
+        return False
+    except Exception as exc:
+        print(f"Error storing track metadata in Vercel KV: {exc}")
+        return False
+
+
+def resolve_track_url(entry):
+    """Derive a canonical SoundCloud track URL from a flat playlist entry."""
+    if not isinstance(entry, dict):
+        return None
+
+    candidate = entry.get('webpage_url') or entry.get('url') or entry.get('webpage')
+    if not candidate:
+        return None
+
+    if candidate.startswith('http://') or candidate.startswith('https://'):
+        return candidate
+
+    return f"https://soundcloud.com/{candidate.lstrip('/')}"
+
+
+def fetch_track_metadata(track_url):
+    """Fetch full track metadata with yt_dlp for a single track."""
+    if not track_url:
+        return None
+
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'skip_download': True,
+        'dump_single_json': True,
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            raw = ydl.extract_info(track_url, download=False)
+            return sanitize_track_metadata(raw)
+    except Exception as exc:
+        print(f"Error fetching metadata for track {track_url}: {exc}")
+        return None
+
+
+def merge_entry_with_metadata(entry, metadata):
+    """Combine flat playlist details with cached metadata for RSS generation."""
+    merged = dict(entry) if isinstance(entry, dict) else {}
+
+    if metadata:
+        for key, value in metadata.items():
+            if value is None:
+                continue
+            if key == 'thumbnails' and not isinstance(value, list):
+                continue
+            merged[key] = value
+
+    merged.setdefault('title', merged.get('name') or 'Unknown Title')
+    merged.setdefault('uploader', 'Unknown Artist')
+
+    track_url = merged.get('webpage_url') or merged.get('url')
+    if not track_url:
+        track_url = resolve_track_url(entry)
+    if track_url:
+        merged['webpage_url'] = track_url
+
+    duration_value = merged.get('duration')
+    if duration_value is None:
+        merged['duration'] = 0
+    else:
+        try:
+            merged['duration'] = int(float(duration_value))
+        except (TypeError, ValueError):
+            merged['duration'] = 0
+
+    timestamp_candidates = (
+        merged.get('timestamp'),
+        merged.get('release_timestamp'),
+        merged.get('epoch'),
+        merged.get('last_modified'),
+        merged.get('upload_date'),
+    )
+    resolved_timestamp = None
+    for candidate in timestamp_candidates:
+        resolved_timestamp = coerce_epoch_seconds(candidate)
+        if resolved_timestamp is not None:
+            break
+    if resolved_timestamp is not None:
+        merged['timestamp'] = resolved_timestamp
+
+    description = merged.get('description')
+    if description is None:
+        merged['description'] = ''
+    elif not isinstance(description, str):
+        merged['description'] = str(description)
+
+    return merged
+
+
+def hydrate_track_entries(entries, max_refreshes=DEFAULT_MAX_METADATA_REFRESHES):
+    """Hydrate flat playlist entries with cached (or freshly fetched) metadata."""
+    if not entries:
+        return []
+
+    hydrated_entries = []
+    remaining_refreshes = max(0, max_refreshes)
+
+    for entry in entries:
+        track_id = None
+        if isinstance(entry, dict):
+            track_id = entry.get('id') or entry.get('track_id') or entry.get('webpage_url')
+
+        cached_record = get_track_metadata(track_id) if track_id else None
+        metadata = None
+        cached_last_modified = None
+
+        if isinstance(cached_record, dict) and cached_record.get('version') == TRACK_METADATA_VERSION:
+            metadata = cached_record.get('metadata')
+            cached_last_modified = coerce_epoch_seconds(cached_record.get('last_modified'))
+
+        entry_last_modified = None
+        if isinstance(entry, dict):
+            entry_last_modified = coerce_epoch_seconds(entry.get('last_modified'))
+            if entry_last_modified is None:
+                entry_last_modified = coerce_epoch_seconds(entry.get('timestamp'))
+
+        needs_refresh = metadata is None
+        if not needs_refresh and entry_last_modified and cached_last_modified and entry_last_modified > cached_last_modified:
+            needs_refresh = True
+
+        new_metadata = None
+        if needs_refresh and remaining_refreshes > 0:
+            track_url = resolve_track_url(entry)
+            new_metadata = fetch_track_metadata(track_url)
+            remaining_refreshes -= 1
+
+            if new_metadata:
+                metadata = new_metadata
+                stored_last_modified = entry_last_modified
+                if stored_last_modified is None:
+                    stored_last_modified = coerce_epoch_seconds(new_metadata.get('last_modified'))
+                if stored_last_modified is None:
+                    stored_last_modified = coerce_epoch_seconds(new_metadata.get('timestamp'))
+                payload = {
+                    'version': TRACK_METADATA_VERSION,
+                    'fetched_at': int(time.time()),
+                    'last_modified': stored_last_modified,
+                    'metadata': metadata,
+                }
+                if track_id:
+                    set_track_metadata(track_id, payload)
+
+        if metadata is None and isinstance(cached_record, dict):
+            metadata = cached_record.get('metadata')
+
+        hydrated_entries.append(merge_entry_with_metadata(entry, metadata))
+
+    return hydrated_entries
+
 def get_channel_info(channel_url, ydl_opts):
     """
     Try to extract channel information by making a separate request to the channel page
@@ -168,6 +512,15 @@ def should_use_smart_timestamps(feed_path):
         '/sets/' in feed_path or
         feed_path.endswith('/sets')
     )
+
+
+def is_default_feed(feed_path):
+    """Detect the special default feed that requires bespoke overrides."""
+    if not feed_path:
+        return False
+
+    normalized = feed_path.split('?', 1)[0].rstrip('/').lower()
+    return normalized == 'kado-nyc/likes'
 
 
 def is_tracks_feed(feed_path):
@@ -273,7 +626,7 @@ def create_podcast_xml(channel_info, server_url, feed_path, source_url):
         "Unknown Channel"
     )
 
-    if feed_path == "kado-nyc/likes":
+    if is_default_feed(feed_path):
         channel_name = "ACSv3"
     
     # Try to get channel description
@@ -292,26 +645,10 @@ def create_podcast_xml(channel_info, server_url, feed_path, source_url):
         ""
     )
 
-    print("channel_info:")
-    # Debug: Let's see all available keys to find the account name
-    print("Available channel_info keys:", list(channel_info.keys()))
-    print("Available channel_info values:")
-    for key in ['title', 'uploader', 'uploader_id', 'uploader_url', 'playlist_uploader', 'channel_uploader', 'channel', 'channel_id', 'channel_url', 'id', 'display_id']:
-        value = channel_info.get(key, "")
-        print(f"  {key}: '{value}'")
-    
-    if first_entry:
-        print("First entry keys:", list(first_entry.keys()))
-        print("First entry uploader info:")
-        for key in ['uploader', 'uploader_id', 'uploader_url', 'channel', 'channel_id', 'channel_url']:
-            value = first_entry.get(key, "")
-            print(f"  {key}: '{value}'")
-    
     # Try to get channel author (uploader) with better fallbacks
     # For the default feed, force the desired author label regardless of metadata
-    if feed_path == "kado-nyc/likes":
+    if is_default_feed(feed_path):
         channel_author = "ACSv3"
-        print("Default feed detected, overriding channel_author to 'ACSv3'")
     else:
         # Extract account name from channel title
         raw_channel_name = channel_info.get("title", "")
@@ -328,8 +665,6 @@ def create_podcast_xml(channel_info, server_url, feed_path, source_url):
             # Fallback to "Unknown Author" if somehow empty
             if not channel_author:
                 channel_author = "Unknown Author"
-            
-            print(f"Extracted account name: '{raw_channel_name}' -> '{channel_author}'")
         else:
             # Fallback to original logic if no title
             channel_author = (
@@ -339,7 +674,6 @@ def create_podcast_xml(channel_info, server_url, feed_path, source_url):
                 (first_entry.get("uploader", "") if first_entry else "") or
                 "Unknown Author"
             )
-            print(f"Using fallback channel_author: '{channel_author}'")
 
     # Channel information
     ET.SubElement(channel, "title").text = channel_name
@@ -349,7 +683,7 @@ def create_podcast_xml(channel_info, server_url, feed_path, source_url):
     ET.SubElement(channel, "description").text = channel_description
     
     # Prefer OG-image from the SoundCloud page, fallback to static art
-    if feed_path == "kado-nyc/likes":
+    if is_default_feed(feed_path):
         channel_artwork_url = f"{server_url}/art.png"
     else:
         channel_artwork_url = fetch_og_image_url(source_url) or f"{server_url}/art.png"
@@ -535,11 +869,17 @@ class handler(BaseHTTPRequestHandler):
         # Get server URL for generating proper links
         server_url = f"https://{self.headers.get('Host', 'localhost')}"
         
+        kv_enabled = vercel_kv_available()
+
         ydl_opts = {
             'format': 'bestaudio/best',
             'dump_single_json': True,
             'playlistend': 5,
         }
+
+        if kv_enabled:
+            ydl_opts['extract_flat'] = True
+            ydl_opts['skip_download'] = True
         
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -549,6 +889,9 @@ class handler(BaseHTTPRequestHandler):
                 if 'entries' not in info:
                     # Convert single track to a list with one item
                     info['entries'] = [info]
+
+                if kv_enabled:
+                    info['entries'] = hydrate_track_entries(info.get('entries', []))
                 
                 # Try to get better channel information if we're missing key details
                 if not info.get('description') and not info.get('thumbnails'):
