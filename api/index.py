@@ -1135,6 +1135,23 @@ class handler(BaseHTTPRequestHandler):
                 else:
                     info['entries'] = info.get('entries', [])[:serve_limit]
                 
+                try:
+                    print(json.dumps({
+                        "kv_enabled": kv_enabled,
+                        "serve_limit": serve_limit,
+                        "head_limit": head_limit,
+                        "cache_limit": cache_limit,
+                        "entries_len": len(info.get('entries', [])),
+                        "total_entries_cached": len(entries) if kv_enabled else len(info.get('entries', [])),
+                        "serve_cursor": payload.get('serve_cursor') if kv_enabled else None,
+                        "backfill_offset": payload.get('backfill_offset') if kv_enabled else None,
+                        "added_new": added_new if kv_enabled else None,
+                        "backfill_limit": BACKFILL_BATCH_SIZE if kv_enabled else None,
+                        "path": channel_or_track,
+                    }))
+                except Exception:
+                    pass
+                
                 # Try to get better channel information if we're missing key details
                 if not info.get('description') and not info.get('thumbnails'):
                     # Extract the channel URL from the current URL
