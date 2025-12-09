@@ -1111,7 +1111,27 @@ class handler(BaseHTTPRequestHandler):
                     }
                     set_feed_cache(channel_or_track, final_payload)
 
-                    info['entries'] = entries[serve_cursor:serve_cursor + serve_limit]
+                    serve_start = 0 if added_new > 0 else current_cursor
+                    serve_start = min(max(0, serve_start), max(0, len(entries) - serve_limit))
+
+                    if added_new > 0:
+                        next_cursor = serve_limit if len(entries) > serve_limit else serve_start
+                    elif serve_start + serve_limit < len(entries):
+                        next_cursor = serve_start + serve_limit
+                    else:
+                        next_cursor = serve_start
+
+                    backfill_offset = payload.get('backfill_offset') if isinstance(payload, dict) else None
+                    if backfill_offset is None:
+                        backfill_offset = len(entries) + 1
+                    elif len(entries) + 1 > backfill_offset:
+                        backfill_offset = len(entries) + 1
+
+                    final_payload['serve_cursor'] = next_cursor
+                    final_payload['backfill_offset'] = backfill_offset
+                    set_feed_cache(channel_or_track, final_payload)
+
+                    info['entries'] = entries[serve_start:serve_start + serve_limit]
                 else:
                     info['entries'] = info.get('entries', [])[:serve_limit]
                 
