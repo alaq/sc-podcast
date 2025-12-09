@@ -40,6 +40,8 @@ VERCEL_KV_REST_API_TOKEN = os.environ.get('KV_REST_API_TOKEN')
 
 TRACK_METADATA_PREFIX = 'track-metadata'
 TRACK_METADATA_VERSION = 'v1'
+FEED_CACHE_PREFIX = 'feed-cache'
+FEED_CACHE_VERSION = 'v1'
 TRACK_METADATA_FIELDS = (
     'id',
     'title',
@@ -59,6 +61,14 @@ try:
     DEFAULT_MAX_METADATA_REFRESHES = int(os.environ.get('MAX_TRACK_METADATA_REFRESHES', '5'))
 except (TypeError, ValueError):
     DEFAULT_MAX_METADATA_REFRESHES = 5
+
+try:
+    FEED_MAX_ITEMS = 200
+except (TypeError, ValueError):
+    FEED_MAX_ITEMS = 200
+
+HEAD_BATCH_SIZE = 5
+BACKFILL_BATCH_SIZE = 5
 
 def get_kv_key(feed_path, track_id):
     """Generate a unique key for a track in a specific feed"""
@@ -340,6 +350,58 @@ def set_track_metadata(track_id, payload):
         return False
 
 
+def get_feed_cache(feed_path):
+    """Retrieve cached hydrated feed entries for a path."""
+    if not vercel_kv_available() or not feed_path:
+        return None
+
+    key = encode_kv_key(f"{FEED_CACHE_PREFIX}:{FEED_CACHE_VERSION}:{feed_path}")
+
+    try:
+        response = requests.get(f'{VERCEL_KV_REST_API_URL}/get/{key}', headers=_kv_headers())
+        if response.status_code == 404:
+            return None
+        if response.status_code != 200:
+            print(f"Error fetching feed cache from KV: {response.status_code} - {response.text}")
+            return None
+
+        decoded = _decode_kv_result(response)
+        if isinstance(decoded, dict) and decoded.get('version') == FEED_CACHE_VERSION:
+            return decoded
+        return None
+    except Exception as exc:
+        print(f"Error accessing feed cache in Vercel KV: {exc}")
+        return None
+
+
+def set_feed_cache(feed_path, payload):
+    """Store hydrated feed entries for a path."""
+    if not vercel_kv_available() or not feed_path or not payload:
+        return False
+
+    key = encode_kv_key(f"{FEED_CACHE_PREFIX}:{FEED_CACHE_VERSION}:{feed_path}")
+    try:
+        response = requests.post(
+            f'{VERCEL_KV_REST_API_URL}/set/{key}',
+            headers=_kv_headers(),
+            json={'value': json.dumps(payload)}
+        )
+        if response.status_code == 200:
+            return True
+        print(f"Error storing feed cache to KV: {response.status_code} - {response.text}")
+        return False
+    except Exception as exc:
+        print(f"Error storing feed cache in Vercel KV: {exc}")
+        return False
+
+
+def _entry_id(entry):
+    """Best-effort unique identifier for a track entry."""
+    if not isinstance(entry, dict):
+        return None
+    return entry.get('id') or entry.get('track_id') or entry.get('webpage_url') or entry.get('url')
+
+
 def resolve_track_url(entry):
     """Derive a canonical SoundCloud track URL from a flat playlist entry."""
     if not isinstance(entry, dict):
@@ -488,6 +550,91 @@ def hydrate_track_entries(entries, max_refreshes=DEFAULT_MAX_METADATA_REFRESHES)
         hydrated_entries.append(merge_entry_with_metadata(entry, metadata))
 
     return hydrated_entries
+
+
+def refresh_feed_entries(
+    feed_path,
+    fresh_entries,
+    max_items=FEED_MAX_ITEMS,
+    max_refreshes=DEFAULT_MAX_METADATA_REFRESHES,
+    prepend=True,
+    persist=True,
+    extra_payload=None,
+):
+    """Merge fresh playlist entries with cached hydrated feed data."""
+    if not fresh_entries:
+        return [], 0, {}
+
+    safe_max_items = max(1, max_items)
+    trimmed_entries = (fresh_entries or [])[:safe_max_items]
+
+    if not vercel_kv_available() or not feed_path:
+        hydrated = hydrate_track_entries(trimmed_entries, max_refreshes=max_refreshes)
+        return hydrated, len(hydrated), {}
+
+    cached_payload = get_feed_cache(feed_path)
+    cached_entries = cached_payload.get('entries', []) if isinstance(cached_payload, dict) else []
+
+    cached_ids = set()
+    for item in cached_entries:
+        entry_id = _entry_id(item)
+        if entry_id:
+            cached_ids.add(entry_id)
+
+    new_entries = []
+    for entry in trimmed_entries:
+        entry_id = _entry_id(entry)
+        if entry_id and entry_id in cached_ids:
+            continue
+        new_entries.append(entry)
+
+    hydrated_new_entries = hydrate_track_entries(new_entries, max_refreshes=max_refreshes)
+
+    if should_use_smart_timestamps(feed_path):
+        for item in hydrated_new_entries:
+            if not isinstance(item, dict):
+                continue
+            if item.get('first_seen') is not None:
+                continue
+            track_id = _entry_id(item)
+            if not track_id:
+                continue
+            first_seen_time = get_track_first_seen_time(feed_path, track_id)
+            if first_seen_time is None:
+                first_seen_time = int(time.time())
+                set_track_first_seen_time(feed_path, track_id, first_seen_time)
+            item['first_seen'] = first_seen_time
+
+    merged_entries = []
+    seen_ids = set()
+    ordered_sources = (hydrated_new_entries + cached_entries) if prepend else (cached_entries + hydrated_new_entries)
+    for item in ordered_sources:
+        entry_id = _entry_id(item)
+        if entry_id and entry_id in seen_ids:
+            continue
+        seen_ids.add(entry_id)
+        merged_entries.append(item)
+        if len(merged_entries) >= safe_max_items:
+            break
+
+    payload = {
+        'version': FEED_CACHE_VERSION,
+        'updated_at': int(time.time()),
+        'entries': merged_entries,
+    }
+
+    if isinstance(cached_payload, dict):
+        for key in ('serve_cursor', 'backfill_offset'):
+            if key in cached_payload:
+                payload[key] = cached_payload[key]
+
+    if isinstance(extra_payload, dict):
+        payload.update(extra_payload)
+
+    if persist and (not cached_payload or hydrated_new_entries or len(merged_entries) != len(cached_entries) or extra_payload):
+        set_feed_cache(feed_path, payload)
+
+    return merged_entries, len(hydrated_new_entries), payload
 
 def get_channel_info(channel_url, ydl_opts):
     """
@@ -709,18 +856,20 @@ def create_podcast_xml(channel_info, server_url, feed_path, source_url):
         # Determine publication date based on feed type
         if should_use_smart_timestamps(feed_path):
             # For likes, reposts, and playlists/sets: use smart timestamp tracking
-            track_id = item.get("id", "") or item.get("webpage_url", "")
-            
-            # Get the first seen time for this track in this feed
-            first_seen_time = None
-            if track_id:
-                first_seen_time = get_track_first_seen_time(feed_path, track_id)
+            first_seen_time = coerce_epoch_seconds(item.get("first_seen"))
+
+            if first_seen_time is None:
+                track_id = item.get("id", "") or item.get("webpage_url", "")
                 
-                # If we haven't seen this track before, store the current time
-                if first_seen_time is None:
-                    current_time = int(time.time())
-                    set_track_first_seen_time(feed_path, track_id, current_time)
-                    first_seen_time = current_time
+                # Get the first seen time for this track in this feed
+                if track_id:
+                    first_seen_time = get_track_first_seen_time(feed_path, track_id)
+                    
+                    # If we haven't seen this track before, store the current time
+                    if first_seen_time is None:
+                        current_time = int(time.time())
+                        set_track_first_seen_time(feed_path, track_id, current_time)
+                        first_seen_time = current_time
             
             # Use the first seen time for the feed, or fall back to current time (now)
             if first_seen_time is not None:
@@ -870,11 +1019,14 @@ class handler(BaseHTTPRequestHandler):
         server_url = f"https://{self.headers.get('Host', 'localhost')}"
         
         kv_enabled = vercel_kv_available()
+        head_limit = HEAD_BATCH_SIZE
+        serve_limit = head_limit
+        cache_limit = FEED_MAX_ITEMS if kv_enabled else head_limit
 
         ydl_opts = {
             'format': 'bestaudio/best',
             'dump_single_json': True,
-            'playlistend': 5,
+            'playlistend': head_limit,
         }
 
         if kv_enabled:
@@ -891,7 +1043,77 @@ class handler(BaseHTTPRequestHandler):
                     info['entries'] = [info]
 
                 if kv_enabled:
-                    info['entries'] = hydrate_track_entries(info.get('entries', []))
+                    entries, added_new, payload = refresh_feed_entries(
+                        channel_or_track,
+                        info.get('entries', []),
+                        max_items=cache_limit,
+                        max_refreshes=DEFAULT_MAX_METADATA_REFRESHES,
+                        prepend=True,
+                        persist=False
+                    )
+
+                    backfill_added = 0
+                    current_cursor = payload.get('serve_cursor', 0) if isinstance(payload, dict) else 0
+                    current_backfill_offset = payload.get('backfill_offset') if isinstance(payload, dict) else None
+
+                    if added_new == 0 and len(entries) < cache_limit:
+                        backfill_start = current_backfill_offset or (len(entries) + 1)
+                        backfill_start = max(backfill_start, len(entries) + 1)
+                        backfill_end = min(cache_limit, backfill_start + BACKFILL_BATCH_SIZE - 1)
+
+                        backfill_opts = {
+                            'format': 'bestaudio/best',
+                            'dump_single_json': True,
+                            'playliststart': backfill_start,
+                            'playlistend': backfill_end,
+                            'extract_flat': True,
+                            'skip_download': True,
+                        }
+
+                        try:
+                            with yt_dlp.YoutubeDL(backfill_opts) as backfill_ydl:
+                                backfill_info = backfill_ydl.extract_info(url, download=False)
+
+                                backfill_entries = backfill_info.get('entries', [])
+                                if not isinstance(backfill_entries, list):
+                                    backfill_entries = [backfill_info]
+
+                                entries, backfill_added, payload = refresh_feed_entries(
+                                    channel_or_track,
+                                    backfill_entries,
+                                    max_items=cache_limit,
+                                    max_refreshes=1,
+                                    prepend=False,
+                                    persist=False
+                                )
+                        except Exception as exc:
+                            print(f"Backfill fetch failed: {exc}")
+
+                    serve_cursor = current_cursor
+                    if added_new > 0:
+                        serve_cursor = 0
+                    elif backfill_added > 0:
+                        serve_cursor = current_cursor + serve_limit
+                        serve_cursor = min(serve_cursor, max(0, len(entries) - serve_limit))
+                    else:
+                        serve_cursor = min(serve_cursor, max(0, len(entries) - serve_limit))
+
+                    backfill_offset = payload.get('backfill_offset') if isinstance(payload, dict) else None
+                    if backfill_added > 0 or backfill_offset is None:
+                        backfill_offset = len(entries) + 1
+
+                    final_payload = {
+                        'version': FEED_CACHE_VERSION,
+                        'updated_at': int(time.time()),
+                        'entries': entries,
+                        'serve_cursor': serve_cursor,
+                        'backfill_offset': backfill_offset,
+                    }
+                    set_feed_cache(channel_or_track, final_payload)
+
+                    info['entries'] = entries[serve_cursor:serve_cursor + serve_limit]
+                else:
+                    info['entries'] = info.get('entries', [])[:serve_limit]
                 
                 # Try to get better channel information if we're missing key details
                 if not info.get('description') and not info.get('thumbnails'):
