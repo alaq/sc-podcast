@@ -1019,6 +1019,16 @@ class handler(BaseHTTPRequestHandler):
         server_url = f"https://{self.headers.get('Host', 'localhost')}"
         
         kv_enabled = vercel_kv_available()
+        try:
+            print(json.dumps({
+                "kv_enabled": kv_enabled,
+                "kv_url_present": bool(VERCEL_KV_REST_API_URL),
+                "kv_token_present": bool(VERCEL_KV_REST_API_TOKEN),
+                "path": channel_or_track,
+                "stage": "init"
+            }))
+        except Exception:
+            pass
         head_limit = HEAD_BATCH_SIZE
         serve_limit = head_limit
         cache_limit = FEED_MAX_ITEMS if kv_enabled else head_limit
