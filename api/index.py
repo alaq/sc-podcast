@@ -1119,7 +1119,7 @@ class handler(BaseHTTPRequestHandler):
                         'serve_cursor': serve_cursor,
                         'backfill_offset': backfill_offset,
                     }
-                    set_feed_cache(channel_or_track, final_payload)
+                    first_cache_write = set_feed_cache(channel_or_track, final_payload)
 
                     serve_start = 0 if added_new > 0 else current_cursor
                     serve_start = min(max(0, serve_start), max(0, len(entries) - serve_limit))
@@ -1139,7 +1139,8 @@ class handler(BaseHTTPRequestHandler):
 
                     final_payload['serve_cursor'] = next_cursor
                     final_payload['backfill_offset'] = backfill_offset
-                    set_feed_cache(channel_or_track, final_payload)
+                    second_cache_write = set_feed_cache(channel_or_track, final_payload)
+                    cache_write_ok = bool(first_cache_write and second_cache_write)
 
                     info['entries'] = entries[serve_start:serve_start + serve_limit]
                 else:
@@ -1157,6 +1158,10 @@ class handler(BaseHTTPRequestHandler):
                         "backfill_offset": payload.get('backfill_offset') if kv_enabled else None,
                         "added_new": added_new if kv_enabled else None,
                         "backfill_limit": BACKFILL_BATCH_SIZE if kv_enabled else None,
+                        "serve_start": serve_start if kv_enabled else None,
+                        "next_cursor": final_payload.get('serve_cursor') if kv_enabled else None,
+                        "cache_write_ok": cache_write_ok if kv_enabled else None,
+                        "backfill_added": backfill_added if kv_enabled else None,
                         "path": channel_or_track,
                     }))
                 except Exception:
