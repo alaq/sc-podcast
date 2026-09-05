@@ -1,7 +1,12 @@
 # Virtual environment
 venv/
-api/__pycache__
+.venv/
+__pycache__/
+.pytest_cache/
+.vercel/
+*.pyc
+migration-data/
 
 # env
 .env*
-
+!.env.example

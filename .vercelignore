@@ -1,0 +1,11 @@
+.env
+.env.*
+.venv
+venv
+__pycache__
+.pytest_cache
+tests
+scripts
+.github
+migration-data
+requirements-dev.txt
