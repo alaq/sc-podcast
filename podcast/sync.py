@@ -64,7 +64,7 @@ class Synchronizer:
             signature = digest(head["entries"])
             retry_due = status.get("retry_at", 0) and status["retry_at"] <= now
             if signature == status.get("head_signature") and not retry_due and not status.get("has_more"):
-                status.update(last_checked_at=now, error=None)
+                status.update(last_checked_at=now, last_success_at=now, error=None)
                 self.store.commit(feed, token, status)
                 return {"state": "unchanged", "feed": feed, "count": status.get("published_count", 0)}
 

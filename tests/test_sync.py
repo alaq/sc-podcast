@@ -27,7 +27,8 @@ def test_resume_200_and_publish_identical_snapshot(config, store, source, feed):
     assert len(items) == len({x.findtext("guid") for x in items}) == 200
     assert all(int(x.find("enclosure").get("length")) > 0 for x in items)
     assert all("\x01" not in ET.tostring(x).decode() for x in items)
-    assert run(config, store, source, feed)["state"] == "unchanged"
+    assert run(config, store, source, feed, 1800000060)["state"] == "unchanged"
+    assert store.status(feed)["last_success_at"] == 1800000060
     assert store.manifest(feed) == before
     assert len(source.audio_calls) == 200
     # Serving/unchanged checks do not transfer the large state or snapshot body.
