@@ -7,6 +7,7 @@ from urllib.parse import quote
 import xml.etree.ElementTree as ET
 
 from podcast.config import DEFAULT_FEED
+from podcast.artwork import episode_artwork
 
 ITUNES = "http://www.itunes.com/dtds/podcast-1.0.dtd"
 ATOM = "http://www.w3.org/2005/Atom"
@@ -69,5 +70,7 @@ def render(feed, entries, base, title=None):
         ET.SubElement(item, "enclosure", url=url, length=str(track["length"]), type="audio/mpeg")
         tag(item, f"{{{ITUNES}}}duration", int(track.get("duration") or 0))
         if track.get("artwork"):
-            ET.SubElement(item, f"{{{ITUNES}}}image", href=track["artwork"])
+            # Upgrade retained metadata too, including tracks outside the latest
+            # SoundCloud listing. Rendering remains entirely local.
+            ET.SubElement(item, f"{{{ITUNES}}}image", href=episode_artwork(track["artwork"]))
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)

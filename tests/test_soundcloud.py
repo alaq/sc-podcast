@@ -31,7 +31,7 @@ def test_listing_uses_like_time_and_full_metadata_without_per_track_requests():
     entry = page["entries"][0]
     assert len(calls) == 2 and len(page["entries"]) == 1 and page["skipped"] == 1
     assert entry["liked_at"] == epoch("2026-09-05T10:00:00Z") > entry["original_published_at"]
-    assert entry["duration"] == 7200 and entry["artwork"].endswith("-t500x500.jpg")
+    assert entry["duration"] == 7200 and entry["artwork"].endswith("-t3000x3000.jpg")
     assert entry["progressive_url"].endswith("/media/42") and "secret" not in page["next"]
 
 

@@ -11,6 +11,7 @@ RSS requests read a prepared snapshot from Upstash Redis. They never call SoundC
 - In Apple Podcasts, use **Follow a Show by URL**. The help page also has an Overcast subscription link.
 - New Likes are checked every five minutes. The CDN may retain the previous snapshot for another five minutes, and clients control their own polling/download schedules.
 - Episodes use the Like date, stable IDs, fixed enclosure URLs, MP3 sizes, artwork, and durations. Existing episodes retain their seeded dates and enclosure identities during migration.
+- Episode artwork uses SoundCloud's 3000×3000 rendition to meet [Apple Podcasts' artwork dimensions](https://podcasters.apple.com/support/5516-episode-art-template). Images load directly from SoundCloud; feed requests never fetch or resize them. Retained 500×500 artwork URLs are upgraded when the snapshot is next published.
 
 Previously discovered sets remain in the archive; unliking does not retract a published episode. Only full progressive MP3s are included. Unavailable, preview-only, and HLS-only tracks are retried separately and do not block other episodes. A Like of an entire playlist is skipped; Like individual sets to include them. A configured playlist source supports its first 200 tracks.
 

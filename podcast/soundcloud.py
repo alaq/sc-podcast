@@ -6,7 +6,6 @@ by fixture/smoke tests. The extractor dependency is deliberately pinned.
 
 import base64
 import json
-import re
 import time
 from datetime import datetime
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
@@ -14,6 +13,8 @@ from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 import requests
 import yt_dlp
 from yt_dlp.extractor.soundcloud import SoundcloudUserIE
+
+from podcast.artwork import episode_artwork
 
 
 class SourceError(RuntimeError):
@@ -67,7 +68,7 @@ def normalize_track(raw, liked_at=None):
         "description": raw.get("description") or "",
         "webpage_url": urlunsplit(("https", "soundcloud.com", parsed.path, "", "")),
         "enclosure_path": parsed.path.strip("/"),
-        "artwork": re.sub(r"-large(\.[a-z]+)$", r"-t500x500\1", artwork),
+        "artwork": episode_artwork(artwork),
         "original_published_at": created, "liked_at": epoch(liked_at) or created,
         "progressive_url": progressive.get("url", ""),
     }
