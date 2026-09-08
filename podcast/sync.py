@@ -6,7 +6,7 @@ import hashlib
 import time
 
 from podcast.feed import render
-from podcast.soundcloud import SourceError, epoch
+from podcast.soundcloud import SourceDeadline, SourceError, epoch
 from podcast.store import StorageError, compact
 
 
@@ -51,14 +51,16 @@ class Synchronizer:
         self.config, self.store, self.source = config, store, source
         self.clock, self.monotonic = clock, monotonic
 
-    def run(self, feed, publish=True, activate=False):
+    def run(self, feed, publish=True, activate=False, initial=False, deadline=None):
         token = self.store.acquire(feed)
         if not token:
             return {"state": "already_running", "feed": feed}
         status = {}
-        deadline = self.monotonic() + self.config.budget_seconds
+        deadline = deadline if deadline is not None else self.monotonic() + self.config.budget_seconds
         now = int(self.clock())
         try:
+            if initial and self.store.manifest(feed):
+                return {"state": "already_published", "feed": feed}
             status = self.store.status(feed)
             head = self.source.listing(feed)
             signature = digest({"entries": head["entries"], "title": head["title"], "image": head.get("image")})
@@ -81,9 +83,9 @@ class Synchronizer:
                 pending.append(head["next"])
 
             # At most one additional page per invocation; cursor progress persists.
-            cursor = pending.pop(0) if pending else None
+            cursor = pending.pop(0) if pending and not initial else None
             candidates = [x for x in state["tracks"].values() if x.get("length") or not x.get("attempts")]
-            if not cursor and len(candidates) < self.config.max_items and state.get("backfill_cursor"):
+            if not initial and not cursor and len(candidates) < self.config.max_items and state.get("backfill_cursor"):
                 cursor = state["backfill_cursor"]
             if cursor and self.monotonic() < deadline - 10:
                 page = self.source.listing(feed, cursor)
@@ -124,10 +126,14 @@ class Synchronizer:
             ordered = sorted(state["tracks"].values(), key=lambda x: (x.get("liked_at", 0), x["id"]), reverse=True)
             attempts = 0
             for track in ordered:
-                if attempts >= self.config.max_audio or self.monotonic() >= deadline - 12:
+                if attempts >= self.config.max_audio or self.monotonic() >= deadline - (0.75 if initial else 12):
+                    break
+                if initial and len(ready_entries(state, self.config.max_items)) >= min(5, self.config.max_items):
                     break
                 if track.get("length") or track.get("retry_at", 0) > now:
                     continue
+                if initial and not track.get("progressive_url"):
+                    continue  # Leave slower fallback resolution to the background worker.
                 # Retain all discovered metadata, but prepare only the useful window.
                 ready = ready_entries(state, self.config.max_items)
                 if len(ready) >= self.config.max_items and (track.get("liked_at", 0), track["id"]) < (ready[-1].get("liked_at", 0), ready[-1]["id"]):
@@ -142,6 +148,8 @@ class Synchronizer:
                         self.store.cache_audio(track["enclosure_path"], audio, ttl)
                     except StorageError:
                         pass  # Playback cache is expendable; feed state is not.
+                except SourceDeadline:
+                    break  # Publish completed episodes without marking the next one unavailable.
                 except SourceError:
                     count = track.get("attempts", 0) + 1
                     track.update(attempts=count, retry_at=now + min(21600, 900 * 2 ** min(count - 1, 5)), error="audio_unavailable")

@@ -57,6 +57,11 @@ def source_feed(value, session=requests):
 REGISTER = """
 if redis.call('EXISTS', KEYS[1]) == 1 then return 0 end
 if ARGV[5] == '1' and redis.call('ZCARD', KEYS[3]) >= tonumber(ARGV[4]) then return -1 end
+if ARGV[7] == '1' then
+  local n = redis.call('INCR', KEYS[4])
+  if n == 1 then redis.call('EXPIRE', KEYS[4], 3600) end
+  if n > 5 then return -2 end
+end
 redis.call('SET', KEYS[1], ARGV[1])
 if ARGV[6] == '1' then redis.call('ZADD', KEYS[2], ARGV[2], ARGV[3]) end
 if ARGV[5] == '1' then redis.call('ZADD', KEYS[3], ARGV[2], ARGV[3]) end
@@ -83,24 +88,23 @@ class Registry:
         if existing:
             return existing
         automatic = feed not in self.config.feeds
-        if automatic and client:
-            key = self.prefix + "rate:" + hashlib.sha256(client.encode()).hexdigest()
-            if self.store.command("EVAL", RATE, 1, key) > 5:
-                raise CapacityError("Too many new feeds. Please try again in an hour.")
+        rate_key = self.prefix + "rate:" + hashlib.sha256((client or "").encode()).hexdigest()
         record = {"feed": feed, "created_at": now, "automatic": automatic}
-        result = self.store.command("EVAL", REGISTER, 3, self.store.key(feed, "registration"),
-                                    self.prefix + "due", self.prefix + "automatic",
+        result = self.store.command("EVAL", REGISTER, 4, self.store.key(feed, "registration"),
+                                    self.prefix + "due", self.prefix + "automatic", rate_key,
                                     compact(record), now, feed, self.config.max_auto_feeds, "1" if automatic else "0",
-                                    "1" if feed == DEFAULT_FEED else "0")
+                                    "1" if feed == DEFAULT_FEED else "0", "1" if automatic and client else "0")
         if result == -1:
             raise CapacityError("This service is at its feed limit. Existing feeds still work.")
+        if result == -2:
+            raise CapacityError("Too many new feeds. Please try again in an hour.")
         return self.get(feed) if result == 0 else record
 
     def later(self, feed, when):
         self.store.command("ZADD", self.prefix + "due", int(when), feed)
 
 
-def request_work(config, store, feed, status=None):
+def request_work(config, store, feed, status=None, immediate=False):
     """Serve saved RSS regardless of enqueue failure; only demand starts work."""
     if feed == DEFAULT_FEED or not config.queue_enabled or not config.qstash_token:
         return False
@@ -114,13 +118,50 @@ def request_work(config, store, feed, status=None):
             return False
         # A failed source or delivery must not turn five-second progress polling
         # into repeated jobs. Keep the cooldown even when enqueueing fails.
-        if now - status.get("last_checked_at", 0) < 60:
+        if not immediate and now - status.get("last_checked_at", 0) < 60:
             return False
         if store.command("SET", store.key(feed, "requested-work"), "1", "NX", "EX", 60) != "OK":
             return False
         return queue_work(config, store, feed)
     except StorageError:
         return False
+
+
+FINISH_INITIAL = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  redis.call('SET', KEYS[1], 'done', 'KEEPTTL')
+end
+return 1
+"""
+
+
+def prepare_first_feed(config, store, feed, source_factory, monotonic=time.monotonic, sleep=time.sleep):
+    """Coalesce cold readers; publish up to five episodes before returning RSS."""
+    deadline = monotonic() + 8
+    key = store.key(feed, "initial-work")
+    token = secrets.token_hex(16)
+    owner = store.command("SET", key, token, "NX", "EX", 60) == "OK"
+    if owner:
+        source = None
+        try:
+            source = source_factory(deadline=deadline - 1)
+            Synchronizer(replace(config, max_audio=10), store, source, monotonic=monotonic).run(
+                feed, activate=True, initial=True, deadline=deadline - 1)
+        except SourceError:
+            pass  # A later background attempt may recover; never invent episodes.
+        finally:
+            if source:
+                source.close()
+            store.command("EVAL", FINISH_INITIAL, 1, key, token)
+        request_work(config, store, feed, immediate=True)
+    while monotonic() < deadline:
+        manifest = store.manifest(feed)
+        if manifest:
+            return manifest
+        if store.command("GET", key) == "done" and not store.command("GET", store.key(feed, "lock")):
+            break
+        sleep(min(0.25, max(0, deadline - monotonic())))
+    return store.manifest(feed)
 
 
 def queue_work(config, store, feed, batches=25, session=requests):

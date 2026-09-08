@@ -18,6 +18,7 @@ import pytest
 from podcast.http import Handler
 from podcast.migrate import publish
 from podcast.registry import Registry, request_work
+from podcast.soundcloud import SourceError
 from podcast.sync import Synchronizer
 from conftest import Source, track
 
@@ -30,7 +31,7 @@ def server(config, store, source, feed):
     class TestHandler(Handler):
         config_factory = staticmethod(lambda: config)
         store_factory = staticmethod(lambda _: store)
-        source_factory = staticmethod(lambda: source)
+        source_factory = staticmethod(lambda **kwargs: source)
         def log_message(self, *args): pass
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), TestHandler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
@@ -87,7 +88,7 @@ def test_audio_get_head_are_direct_uncached_redirects(server):
 
 def test_unknown_sources_and_public_status(server):
     request, _ = server
-    assert request(path="/unknown/likes")[0] == 503  # starts automatic preparation
+    assert request(path="/unknown/likes")[0] == 200  # prepares a usable first batch
     assert request(path="/api/sync")[0] == 405
     status, _, body = request(path="/status")
     assert status == 200 and json.loads(body)["published_count"] == 8
@@ -104,19 +105,17 @@ def test_new_source_prepares_incrementally_and_reuses_subscription(server, sourc
     data = json.loads(body)
     assert status == 200 and data["feed"] == "robot-heart/tracks" and data["count"] == 0
     assert (len(source.list_calls), len(source.audio_calls)) == calls
-    assert request(path="/robot-heart/tracks")[0] == 503
-    auth = {"Authorization": "Bearer " + config.sync_secret}
-    assert request("POST", "/api/sync", '{"feed":"robot-heart/tracks"}', auth)[0] == 200
     status, _, first = request(path="/robot-heart/tracks")
     assert status == 200
     first_ids = {x.findtext("guid") for x in ET.fromstring(first).findall("./channel/item")}
-    assert len(first_ids) == 8
+    assert len(first_ids) == 5
+    auth = {"Authorization": "Bearer " + config.sync_secret}
     assert request("POST", "/api/sync", '{"feed":"robot-heart/tracks"}', auth)[0] == 200
     second = request(path="/robot-heart/tracks")[2]
     second_ids = {x.findtext("guid") for x in ET.fromstring(second).findall("./channel/item")}
-    assert len(second_ids) == 16 and first_ids <= second_ids
+    assert len(second_ids) == 13 and first_ids <= second_ids
     repeat = json.loads(request("POST", "/api/feeds", '{"url":"robot-heart/tracks"}')[2])
-    assert repeat["count"] == 16 and repeat["feed_url"] == data["feed_url"]
+    assert repeat["count"] == 13 and repeat["feed_url"] == data["feed_url"]
     assert request()[2] == before
     assert json.loads(request(path="/api/feeds?source=robot-heart/tracks")[2])["state"] == "ready"
     assert b"Create podcast feed" in request(path="/add")[2]
@@ -127,6 +126,60 @@ def test_registration_rejects_external_urls_and_cross_origin_requests(server):
     assert request("POST", "/api/feeds", '{"url":"https://example.com/collect"}')[0] == 400
     assert request("POST", "/api/feeds", '{"url":"robot-heart"}', {"Origin": "https://example.com"})[0] == 403
     assert request(path="/api/feeds?source=not-added/likes")[0] == 404
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+def test_direct_cold_subscription_publishes_five_without_webpage(server, source, store, method):
+    request, config = server
+    feed = "direct/tracks"
+    calls = len(source.audio_calls), len(source.list_calls)
+    status, headers, body = request(method, "/" + feed)
+    assert status == 200
+    assert len(source.audio_calls) - calls[0] == 5
+    assert len(source.list_calls) - calls[1] == 1
+    assert Registry(config, store).get(feed)["automatic"]
+    assert len(store.state(feed)["tracks"]) == 200
+    second = request(path="/" + feed)
+    items = ET.fromstring(second[2]).findall("./channel/item")
+    assert len(items) == 5 and all(int(x.find("enclosure").get("length")) > 0 for x in items)
+    assert int(headers["Content-Length"]) == len(second[2])
+    assert body == (b"" if method == "HEAD" else second[2])
+    assert len(source.audio_calls) - calls[0] == 5
+    assert len(source.list_calls) - calls[1] == 1
+
+
+def test_concurrent_first_subscribers_share_initial_preparation(server, source, monkeypatch):
+    request, _ = server
+    original = source.listing
+    def slow_listing(*args):
+        time.sleep(0.1)
+        return original(*args)
+    monkeypatch.setattr(source, "listing", slow_listing)
+    calls = len(source.audio_calls), len(source.list_calls)
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        results = list(pool.map(lambda _: request(path="/direct/tracks"), range(10)))
+    assert all(r[0] == 200 and r[2] == results[0][2] for r in results)
+    assert len(ET.fromstring(results[0][2]).findall("./channel/item")) == 5
+    assert (len(source.audio_calls) - calls[0], len(source.list_calls) - calls[1]) == (5, 1)
+
+
+def test_cold_source_failure_is_retryable_without_empty_feed_or_repeated_extraction(server, source):
+    request, _ = server
+    source.pages[None] = SourceError("Source unavailable")
+    calls = len(source.list_calls)
+    for _ in range(2):
+        status, headers, body = request(path="/offline/tracks")
+        assert status == 503 and headers["Retry-After"] == "5"
+        assert b"<rss" not in body and b"request this feed again" in body
+    assert len(source.list_calls) == calls + 1
+
+
+def test_cold_rss_does_not_bypass_main_publication_gate(server, store, source, feed):
+    request, _ = server
+    store.command("DEL", store.key(feed, "manifest"))
+    calls = len(source.list_calls)
+    assert request()[0] == 503
+    assert len(source.list_calls) == calls
 
 
 @pytest.mark.parametrize("method,path,conditional", [

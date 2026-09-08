@@ -20,7 +20,7 @@ from podcast.config import Config, DEFAULT_FEED, normalize_feed
 from podcast.soundcloud import SoundCloud, SourceError
 from podcast.store import Store, StorageError
 from podcast.sync import Synchronizer
-from podcast.registry import CapacityError, Registry, continue_work, request_work, run_tick, source_feed
+from podcast.registry import CapacityError, Registry, continue_work, prepare_first_feed, request_work, run_tick, source_feed
 
 LOG = logging.getLogger("sc-podcast")
 
@@ -103,23 +103,21 @@ class Handler(BaseHTTPRequestHandler):
                 return
             feed = normalize_feed(path)
             registered = feed in config.feeds
+            automatic = False
             if feed not in config.feeds:
                 feed = source_feed(path)
                 registry = Registry(config, store)
-                if not registry.get(feed):
-                    if self.command != "HEAD":
-                        registry.register(feed, self.registration_client())
-                        registered = True
-                else:
-                    registered = True
-            # Conditional and HEAD requests count as demand too. This only
-            # queues bounded work; RSS reads never wait on SoundCloud extraction.
-            if registered:
-                request_work(config, store, feed)
+                record = registry.register(feed, self.registration_client())
+                registered = True
+                automatic = record["automatic"]
             manifest = store.manifest(feed)
+            if not manifest and automatic:
+                manifest = prepare_first_feed(config, store, feed, self.source_factory)
+            elif registered:
+                request_work(config, store, feed)
             if not manifest:
                 link = base + "/add?source=" + quote(feed, safe="")
-                self.reply(503, ("This feed is preparing its first playable episodes. Open " + link + " to follow progress and subscribe when ready.").encode(), headers={"Retry-After": "5", "Cache-Control": "no-store", "Link": '<' + link + '>; rel="help"'})
+                self.reply(503, b"No playable episodes are ready yet. Preparation will retry; please request this feed again shortly.", headers={"Retry-After": "5", "Cache-Control": "no-store", "Link": '<' + link + '>; rel="help"'})
                 return
             variant = manifest["variants"].get(base) or manifest["variants"][config.bases[0]]
             headers = {"Cache-Control": "public, max-age=0, must-revalidate", "Vercel-CDN-Cache-Control": "public, s-maxage=300, stale-while-revalidate=60",

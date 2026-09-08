@@ -2,13 +2,13 @@
 
 Like DJ sets on SoundCloud and listen in Overcast, Apple Podcasts, or another RSS podcast app. The default feed is `kado-nyc/likes`, published as **ACSv3**.
 
-RSS requests read a prepared snapshot from Upstash Redis. They never call SoundCloud or extract tracks. A separate authenticated sync discovers Likes, prepares playable MP3 metadata, and atomically publishes up to **200 episodes**. Existing subscribers keep their feed URL.
+RSS requests normally read a prepared snapshot from Upstash Redis. For a brand-new source, the first request discovers metadata and prepares up to **five playable episodes** before returning RSS. Background sync then fills the archive toward **200 episodes**. Existing subscribers keep their feed URL.
 
 ## Listening
 
 - Feed: `https://sc-podcast.vercel.app/` (also `https://podcast.alaq.io/`).
 - Subscription help and current sync status: `/about`.
-- Add another SoundCloud source: `/add`. No per-source configuration is required.
+- Subscribe directly to another SoundCloud source, for example `https://podcast.alaq.io/robot-heart/tracks`. The `/add` page is an optional URL helper and progress view. No per-source configuration is required.
 - In Apple Podcasts, use **Follow a Show by URL**. The help page also has an Overcast subscription link.
 - New Likes are checked every five minutes. The CDN may retain the previous snapshot for another five minutes, and clients control their own polling/download schedules.
 - Episodes use the Like date, stable IDs, fixed enclosure URLs, MP3 sizes, artwork, and durations. Existing episodes retain their seeded dates and enclosure identities during migration.
@@ -18,11 +18,13 @@ Previously discovered sets remain in the archive; unliking does not retract a pu
 
 ## Add a SoundCloud page
 
-1. Open `https://sc-podcast.vercel.app/add` and paste a public SoundCloud URL. Profiles use uploads; `/likes`, `/reposts`, individual tracks, playlists and `on.soundcloud.com` share links are supported. Search, personalized home pages and private tracks are not.
-2. The page creates a shared, stable feed URL and displays preparation progress. Subscription controls appear once the first real playable episodes are published.
-3. Subscribe immediately; the archive grows in background batches toward 200 episodes. Adding the same source again reuses its feed, even across listeners.
+Subscribe in your podcast app by replacing `soundcloud.com` with `podcast.alaq.io` in a public source URL. For example, Robot Heart uploads use `https://podcast.alaq.io/robot-heart/tracks` (or simply `/robot-heart`), and its Likes use `https://podcast.alaq.io/robot-heart/likes`. Profiles, `/likes`, `/reposts`, individual tracks and playlists are supported. Search, personalized home pages and private tracks are not.
 
-Requesting a new RSS path such as `/robot-heart/tracks` also starts registration automatically. While its first episodes are pending, it returns a fast `503` with `Retry-After: 5` and a preparation-page link. Some podcast apps reject a brand-new empty/pending feed, so use `/add` for reliable first-time subscription. Once ready, feed reads return the saved snapshot and may enqueue a bounded refresh when it is due; they never wait for SoundCloud extraction.
+The first RSS request registers the source, saves its first page of track metadata and pagination cursor, prepares five playable episodes, and returns usable RSS. It immediately queues background batches to grow the same feed toward 200 episodes. Concurrent first subscribers share preparation, including clients that probe with `HEAD` before `GET`. Adding the same source again reuses its feed across listeners.
+
+Initial preparation targets an eight-second soft budget, with seven seconds for source work, short network timeouts and at most ten audio attempts to find five successes. It returns fewer episodes if the source has fewer playable tracks or the budget runs short; subsequent batches retain their IDs and dates. Exact source totals are not needed: saved metadata and pagination cursors let preparation resume. Only if no real episode can be prepared does the request return retryable `503` with `Retry-After: 5`; repeated cold attempts are coalesced for a minute. Network/storage latency can extend the soft budget. Once a snapshot exists, reads never wait for SoundCloud extraction.
+
+Optionally, open `https://podcast.alaq.io/add` to paste a URL (including `on.soundcloud.com` share links) and see progress or subscription controls. Visiting this page is not required before subscribing directly.
 
 Only the main ACSv3 feed uses the five-minute scheduler. Every other feed refreshes on demand: a request to its RSS URL (including HEAD or conditional 304 requests), registration page, or progress API can enqueue work if its last successful check is at least 30 minutes old. Incomplete preparation can resume sooner. No more requests means no more refreshes after the already-started, bounded preparation burst finishes; metadata, saved RSS and URLs remain available. An unsubscribe is not observable directly: an app or crawler that continues polling still counts as demand.
 
@@ -35,7 +37,8 @@ Each request-triggered burst can queue up to 25 short background batches, stoppi
 ```text
 Main feed: QStash (every 5 min) → SoundCloud sync → atomic RSS publication
 Other feeds: client request → saved RSS + one-off QStash work when due
-Add URL / progress page → Redis registration + bounded preparation batches
+New RSS URL → Redis registration + metadata → first five episodes → background batches
+Optional add / progress page → Redis registration + bounded preparation batches
 Podcast app → Vercel CDN → Redis manifest + saved RSS
 Podcast app → /track/artist/set → temporary 302 → SoundCloud MP3 CDN
 ```
@@ -44,7 +47,7 @@ Redis holds compressed discovery state, fixed publication dates, permanent track
 
 Feed responses support `HEAD`, gzip, ETags and `Last-Modified`. Unchanged conditional requests avoid reading the large RSS body; secondary feeds also read their small status record to decide whether to enqueue work. Snapshot publication is atomic and guarded by an expiring lock with an ownership check. Failed discovery/preparation leaves the previous feed available. A Redis outage can still affect an uncached origin read; the CDN is a cache, not an independent durable replica.
 
-Sync saves discovered metadata before audio preparation, processes at most one extra listing page and eight audio items per invocation, and resumes after interruption. Retryable tracks use backoff. Unchanged checks do not fetch the large saved state. The yt-dlp SoundCloud adapter is isolated in `podcast/soundcloud.py` and pinned because it uses extractor internals.
+Sync saves discovered metadata before audio preparation and resumes after interruption. Background invocations process at most one extra listing page and eight audio items; the initial RSS request only reads the head page and stops at five successes or its time/attempt budget. Retryable tracks use backoff. Unchanged checks do not fetch the large saved state. The yt-dlp SoundCloud adapter is isolated in `podcast/soundcloud.py` and pinned because it uses extractor internals.
 
 ## Setup
 
@@ -76,7 +79,7 @@ Fill `.env` locally; it is gitignored. Configure the same variables in Vercel:
 
 New sources do not need an allowlist edit, manual publication or any recurring schedule. Use `podcast.cli schedule create` for the main feed only. If upgrading from the shared-tick deployment, this updates the same existing schedule ID to `{"feed":"kado-nyc/likes"}`. The old `{"tick":true}` endpoint and `--shared` option remain compatible but now process only the main feed, ignoring historical secondary entries in the due index. `podcast.cli tick` also refreshes only the main feed. Snapshot and registration keys require no migration.
 
-Preview deployments automatically append a branch hash to the Redis namespace and disable Overcast pings and background-message dispatch. To prepare that same namespace locally, use `VERCEL_ENV=preview` and the branch name in `VERCEL_GIT_COMMIT_REF`, then `podcast.cli --feed source/tracks sync` after registering through the preview page. For browser testing, include the preview origin in `PUBLIC_BASE_URLS`. Keep its `SYNC_URL` consistent with the deployment when testing signed requests, and account for deployment protection. Preview registration never queues production jobs.
+Preview deployments automatically append a branch hash to the Redis namespace and disable Overcast pings and background-message dispatch. A direct new RSS request still prepares its first episodes. To continue preparation in that namespace locally, use `VERCEL_ENV=preview` and the branch name in `VERCEL_GIT_COMMIT_REF`, then `podcast.cli --feed source/tracks sync`. For browser testing, include the preview origin in `PUBLIC_BASE_URLS`. Keep its `SYNC_URL` consistent with the deployment when testing signed requests, and account for deployment protection. Preview registration never queues production jobs.
 
 ## Safe rollout of the existing feed
 
@@ -122,7 +125,7 @@ Automatically registered sources publish incrementally as soon as real episodes 
 .venv/bin/python local_server.py
 ```
 
-The tests use synthetic SoundCloud responses and execute actual Redis commands/Lua through fakeredis. They cover 200-episode batching, interrupted work, pagination gaps, unavailable-track recovery, locking, old-snapshot preservation, conditional responses, concurrent readers, JWT authentication, and SQLite migration retries. Test runs do not need service credentials or send messages. Live source probes and hosted deployment checks remain separate.
+The tests use synthetic SoundCloud responses and execute actual Redis commands/Lua through fakeredis. They cover cold GET/HEAD subscriptions, concurrent first subscribers, partial initial progress, immediate continuation, 200-episode batching, interrupted work, pagination gaps, unavailable-track recovery, locking, old-snapshot preservation, conditional responses, JWT authentication, and SQLite migration retries. Test runs do not need service credentials or send messages. Live source probes and hosted deployment checks remain separate.
 
 `GET /status` exposes default-feed timestamps and counts. `POST /api/feeds` accepts a public SoundCloud `url`; `GET /api/feeds?source=user/tracks` returns preparation progress. `POST /api/sync` accepts `{"tick":true}` for main-feed work or `{"feed":"kado-nyc/likes"}` for one feed, with a QStash signature or the manual bearer credential. Keep tokens out of command history and request logs. `PING_OVERCAST` remains off; the main-feed tick does not send pings.
 

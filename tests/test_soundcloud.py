@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from podcast.config import Config, normalize_feed
-from podcast.soundcloud import SoundCloud, SourceError, clean_cursor, epoch, normalize_track, signed_url_expiry
+from podcast.soundcloud import DeadlineYoutubeDL, SoundCloud, SourceDeadline, SourceError, clean_cursor, epoch, normalize_track, signed_url_expiry
 
 
 def raw_track():
@@ -71,6 +71,24 @@ def test_preview_only_tracks_are_rejected_and_cursor_cannot_leave_soundcloud():
         source.resolve_audio(normalize_track(raw))
     with pytest.raises(SourceError):
         clean_cursor("https://attacker.invalid/collect")
+
+
+def test_initial_network_operations_obey_remaining_budget(monkeypatch):
+    requests = []
+    monkeypatch.setattr("yt_dlp.YoutubeDL.urlopen", lambda self, req: requests.append(req))
+    now = [100]
+    monkeypatch.setattr("podcast.soundcloud.time.monotonic", lambda: now[0])
+    ydl = object.__new__(DeadlineYoutubeDL)
+    ydl.deadline = 107
+    ydl.urlopen("https://api-v2.soundcloud.com/resolve")
+    assert requests[-1].extensions["timeout"] == 1.5
+    now[0] = 106.75
+    ydl.urlopen("https://api-v2.soundcloud.com/resolve")
+    assert requests[-1].extensions["timeout"] == 0.25
+    now[0] = 107
+    with pytest.raises(SourceDeadline):
+        ydl.urlopen("https://api-v2.soundcloud.com/resolve")
+    assert len(requests) == 2
 
 
 def test_cloudfront_policy_expiry_and_legacy_dates():
