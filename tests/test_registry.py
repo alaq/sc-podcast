@@ -1,11 +1,12 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
-from podcast.registry import CapacityError, Registry, continue_work, queue_work, run_tick, source_feed
+from podcast.registry import CapacityError, Registry, continue_work, queue_work, request_work, run_tick, source_feed
 from podcast.soundcloud import SourceError
 from podcast.sync import Synchronizer
 from conftest import Source, track
@@ -60,32 +61,31 @@ def test_new_feed_rate_limit_does_not_affect_repeat_subscriptions(config, store)
     assert registry.register("user-0/likes", "same-client")["feed"] == "user-0/likes"
 
 
-def test_shared_tick_publishes_new_feeds_without_bypassing_existing_migration(config, store, feed):
+def test_tick_only_touches_main_even_with_legacy_secondary_due_entries(config, store, feed):
     now = 1800000000
+    config = replace(config, feeds=(feed, "configured/tracks"))
     registry = Registry(config, store)
-    registry.register("new/tracks", now=now)
-    source = Source([track(1), track(2)])
+    for other in ("new/tracks", "configured/tracks"):
+        registry.register(other, now=now)
+        registry.later(other, now - 1000)  # Old deployments put these in the shared index.
+    calls = []
+    class MainOnlySource(Source):
+        def listing(self, name, cursor=None):
+            calls.append(name)
+            assert name == feed
+            return super().listing(name, cursor)
+    source = MainOnlySource([track(1), track(2)])
     result = run_tick(config, store, lambda: source, clock=lambda: now)
-    assert result["state"] == "checked"
-    assert store.manifest("new/tracks")["count"] == 2
+    assert result["feeds"] == [{"feed": feed, "state": "prepared"}]
     assert store.manifest(feed) is None
-    assert store.status("new/tracks")["rollout_ready"]
     assert not store.status(feed)["rollout_ready"]
-    calls = len(source.list_calls)
+    assert not store.status("new/tracks") and not store.status("configured/tracks")
+    assert calls == [feed]
     run_tick(config, store, lambda: source, clock=lambda: now + 60)
-    assert len(source.list_calls) == calls
-
-
-def test_idle_feeds_pause_and_activity_wakes_them(config, store):
-    now = 1800000000
-    registry = Registry(config, store)
-    registry.register("old/tracks", now=now - 31 * 86400)
-    source = Source([track(1)])
-    run_tick(config, store, lambda: source, clock=lambda: now)
-    assert not store.manifest("old/tracks")
-    registry.touch("old/tracks", now)
-    run_tick(config, store, lambda: source, clock=lambda: now)
-    assert store.manifest("old/tracks")["count"] == 1
+    assert calls == [feed]
+    run_tick(config, store, lambda: source, clock=lambda: now + 31 * 86400)
+    assert calls == [feed, feed]
+    assert not store.status("new/tracks") and not store.status("configured/tracks")
 
 
 def test_first_sync_failure_is_visible_and_success_recovers(config, store):
@@ -102,12 +102,15 @@ def test_first_sync_failure_is_visible_and_success_recovers(config, store):
 def test_queue_coalesces_subscribers_and_preview_never_dispatches(config, store):
     config = replace(config, qstash_token="test-token")
     sent = []
-    client = SimpleNamespace(message=SimpleNamespace(publish_json=lambda **kw: sent.append(kw)))
-    assert queue_work(config, store, "new/tracks", client=client)
-    assert not queue_work(config, store, "new/tracks", client=client)
-    assert len(sent) == 1 and sent[0]["body"]["bootstrap"] == 25
-    assert sent[0]["url"] == config.sync_url and sent[0]["timeout"] == "60s"
-    assert not queue_work(replace(config, queue_enabled=False), store, "preview/tracks", client=client)
+    session = SimpleNamespace(post=lambda url, **kw: (sent.append((url, kw)), nullcontext(SimpleNamespace(status_code=202)))[1])
+    assert queue_work(config, store, "new/tracks", session=session)
+    assert not queue_work(config, store, "new/tracks", session=session)
+    assert len(sent) == 1 and sent[0][1]["json"]["bootstrap"] == 25
+    assert sent[0][0].endswith("/v2/publish/" + config.sync_url)
+    assert sent[0][1]["timeout"] == (0.5, 1.5)
+    assert sent[0][1]["headers"]["Upstash-Timeout"] == "60s"
+    assert sent[0][1]["allow_redirects"] is False
+    assert not queue_work(replace(config, queue_enabled=False), store, "preview/tracks", session=session)
     assert len(sent) == 1
 
 
@@ -124,7 +127,7 @@ def test_bootstrap_stops_at_budget_and_stale_job_cannot_continue(config, store, 
     assert not sent
 
 
-def test_daily_queue_budget_leaves_feed_available_for_shared_tick(config, store, monkeypatch):
+def test_daily_queue_budget_requires_new_demand_after_reset(config, store, monkeypatch):
     import podcast.registry as module
     monkeypatch.setattr(module.time, "time", lambda: 1800000000)
     config = replace(config, qstash_token="test-token")
@@ -133,25 +136,72 @@ def test_daily_queue_budget_leaves_feed_available_for_shared_tick(config, store,
     key = config.namespace + ":bootstrap-budget:" + str(1800000000 // 86400)
     store.command("SET", key, "500", "EX", 90000)
     sent = []
-    client = SimpleNamespace(message=SimpleNamespace(publish_json=lambda **kw: sent.append(kw)))
-    assert not queue_work(config, store, feed, client=client)
+    monkeypatch.setattr(module.requests, "post", lambda *a, **kw: (sent.append(kw), nullcontext(SimpleNamespace(status_code=202)))[1])
+    assert not request_work(config, store, feed)
     assert not sent
     assert store.command("GET", store.key(feed, "queued-work")) is None
     run_tick(config, store, lambda: Source([track(1)]), clock=lambda: 1800000000)
-    assert store.manifest(feed)["count"] == 1
+    assert store.manifest(feed) is None
+    monkeypatch.setattr(module.time, "time", lambda: 1800000000 + 86400)
+    assert not sent  # Time passing alone does not trigger work.
+    assert request_work(config, store, feed)
+    assert len(sent) == 1
 
 
-def test_tick_failure_does_not_block_other_sources(config, store):
+def test_tick_records_main_failure_without_touching_secondary_sources(config, store, feed):
     now = 1800000000
     registry = Registry(config, store)
-    registry.register("broken/tracks", now=now)
     registry.register("working/tracks", now=now)
-    class MixedSource(Source):
-        def listing(self, feed, cursor=None):
-            if feed == "broken/tracks":
-                raise SourceError("Unavailable")
-            return super().listing(feed, cursor)
-    result = run_tick(config, store, lambda: MixedSource([track(1)]), clock=lambda: now)
-    assert {"feed": "broken/tracks", "state": "retrying"} in result["feeds"]
-    assert store.manifest("working/tracks")["count"] == 1
-    assert store.status("broken/tracks")["error"] == "sync_failed"
+    result = run_tick(config, store, lambda: Source(pages={None: SourceError("Unavailable")}), clock=lambda: now)
+    assert result["feeds"] == [{"feed": feed, "state": "retrying"}]
+    assert store.manifest("working/tracks") is None
+    assert store.status(feed)["error"] == "sync_failed"
+
+
+def test_demand_checks_freshness_and_coalesces_concurrent_readers(config, store, monkeypatch):
+    import podcast.registry as module
+    now = 1800000000
+    monkeypatch.setattr(module.time, "time", lambda: now)
+    config = replace(config, qstash_token="test-token")
+    sent = []
+    monkeypatch.setattr(module.requests, "post", lambda *a, **kw: (sent.append(kw), nullcontext(SimpleNamespace(status_code=202)))[1])
+    feed = "new/tracks"
+    store.command("SET", store.key(feed, "status"), json.dumps({"last_success_at": now, "last_checked_at": now}))
+    assert not request_work(config, store, feed)
+    assert not request_work(config, store, config.feeds[0])
+    now += 1801
+    assert not sent
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        results = list(pool.map(lambda _: request_work(config, store, feed), range(10)))
+    assert sum(results) == 1 and len(sent) == 1
+
+
+def test_failed_enqueue_is_throttled_and_later_demand_recovers(config, store, monkeypatch):
+    import podcast.registry as module
+    now = 1800000000
+    monkeypatch.setattr(module.time, "time", lambda: now)
+    config = replace(config, qstash_token="test-token")
+    sent = []
+    def post(*args, **kwargs):
+        sent.append(kwargs)
+        return nullcontext(SimpleNamespace(status_code=503 if len(sent) == 1 else 202))
+    monkeypatch.setattr(module.requests, "post", post)
+    assert not request_work(config, store, "new/tracks")
+    assert store.command("GET", store.key("new/tracks", "queued-work")) is None
+    assert not request_work(config, store, "new/tracks")
+    assert len(sent) == 1
+    now += 61
+    assert request_work(config, store, "new/tracks")
+    assert len(sent) == 2
+
+
+def test_incomplete_archive_resumes_on_demand_before_normal_refresh_interval(config, store, monkeypatch):
+    import podcast.registry as module
+    now = 1800000000
+    monkeypatch.setattr(module.time, "time", lambda: now)
+    config = replace(config, qstash_token="test-token")
+    sent = []
+    monkeypatch.setattr(module, "queue_work", lambda *args: sent.append(args) or True)
+    status = {"last_success_at": now - 61, "last_checked_at": now - 61, "retry_at": now - 61, "has_more": False}
+    assert request_work(config, store, "new/tracks", status)
+    assert len(sent) == 1

@@ -1,7 +1,6 @@
-"""Automatic source registration, shared work queue and bounded refresh ticks."""
+"""Automatic registration, request-driven work and the main feed's refresh tick."""
 
 import hashlib
-import json
 import os
 import secrets
 import time
@@ -9,9 +8,8 @@ from dataclasses import replace
 from urllib.parse import urljoin, urlsplit
 
 import requests
-from qstash import QStash
 
-from podcast.config import normalize_feed
+from podcast.config import DEFAULT_FEED, normalize_feed
 from podcast.soundcloud import SourceError
 from podcast.store import RELEASE, StorageError, compact
 from podcast.sync import Synchronizer
@@ -58,11 +56,10 @@ def source_feed(value, session=requests):
 
 REGISTER = """
 if redis.call('EXISTS', KEYS[1]) == 1 then return 0 end
-if ARGV[5] == '1' and redis.call('ZCARD', KEYS[4]) >= tonumber(ARGV[4]) then return -1 end
+if ARGV[5] == '1' and redis.call('ZCARD', KEYS[3]) >= tonumber(ARGV[4]) then return -1 end
 redis.call('SET', KEYS[1], ARGV[1])
-redis.call('ZADD', KEYS[2], ARGV[2], ARGV[3])
-redis.call('ZADD', KEYS[3], ARGV[2], ARGV[3])
-if ARGV[5] == '1' then redis.call('ZADD', KEYS[4], ARGV[2], ARGV[3]) end
+if ARGV[6] == '1' then redis.call('ZADD', KEYS[2], ARGV[2], ARGV[3]) end
+if ARGV[5] == '1' then redis.call('ZADD', KEYS[3], ARGV[2], ARGV[3]) end
 return 1
 """
 RATE = """
@@ -84,7 +81,6 @@ class Registry:
         now = int(time.time()) if now is None else now
         existing = self.get(feed)
         if existing:
-            self.touch(feed, now)
             return existing
         automatic = feed not in self.config.feeds
         if automatic and client:
@@ -92,29 +88,42 @@ class Registry:
             if self.store.command("EVAL", RATE, 1, key) > 5:
                 raise CapacityError("Too many new feeds. Please try again in an hour.")
         record = {"feed": feed, "created_at": now, "automatic": automatic}
-        result = self.store.command("EVAL", REGISTER, 4, self.store.key(feed, "registration"),
-                                    self.prefix + "due", self.prefix + "active", self.prefix + "automatic",
-                                    compact(record), now, feed, self.config.max_auto_feeds, "1" if automatic else "0")
+        result = self.store.command("EVAL", REGISTER, 3, self.store.key(feed, "registration"),
+                                    self.prefix + "due", self.prefix + "automatic",
+                                    compact(record), now, feed, self.config.max_auto_feeds, "1" if automatic else "0",
+                                    "1" if feed == DEFAULT_FEED else "0")
         if result == -1:
             raise CapacityError("This service is at its feed limit. Existing feeds still work.")
         return self.get(feed) if result == 0 else record
-
-    def touch(self, feed, now=None):
-        now = int(time.time()) if now is None else now
-        key = self.store.key(feed, "activity-touch")
-        if self.store.command("SET", key, "1", "NX", "EX", 3600) == "OK":
-            self.store.command("ZADD", self.prefix + "active", now, feed)
-            # Wake an idle feed without adding a separate recurring schedule.
-            self.store.command("ZADD", self.prefix + "due", "LT", now, feed)
-
-    def due(self, now):
-        return self.store.command("ZRANGEBYSCORE", self.prefix + "due", "-inf", now, "LIMIT", 0, self.config.max_auto_feeds + len(self.config.feeds))
 
     def later(self, feed, when):
         self.store.command("ZADD", self.prefix + "due", int(when), feed)
 
 
-def queue_work(config, store, feed, batches=25, client=None):
+def request_work(config, store, feed, status=None):
+    """Serve saved RSS regardless of enqueue failure; only demand starts work."""
+    if feed == DEFAULT_FEED or not config.queue_enabled or not config.qstash_token:
+        return False
+    try:
+        now = time.time()
+        status = store.status(feed) if status is None else status
+        retry = status.get("retry_at", 0)
+        pending = status.get("has_more") or (retry and retry <= now)
+        stale = not status.get("last_success_at") or now - status["last_success_at"] >= config.auto_refresh_seconds
+        if not pending and not stale and not status.get("error"):
+            return False
+        # A failed source or delivery must not turn five-second progress polling
+        # into repeated jobs. Keep the cooldown even when enqueueing fails.
+        if now - status.get("last_checked_at", 0) < 60:
+            return False
+        if store.command("SET", store.key(feed, "requested-work"), "1", "NX", "EX", 60) != "OK":
+            return False
+        return queue_work(config, store, feed)
+    except StorageError:
+        return False
+
+
+def queue_work(config, store, feed, batches=25, session=requests):
     """One lease per feed prevents concurrent subscribers creating duplicate chains."""
     if not config.queue_enabled or not config.qstash_token:
         return False
@@ -123,18 +132,26 @@ def queue_work(config, store, feed, batches=25, client=None):
     if store.command("SET", key, token, "NX", "EX", 180) != "OK":
         return False
     try:
+        # Retain the existing key across rollout; now covers all on-demand work.
         budget_key = config.namespace + ":bootstrap-budget:" + str(int(time.time()) // 86400)
         count = store.command("EVAL", RATE, 1, budget_key, 90000)
         if count > 500:
             store.command("EVAL", RELEASE, 1, key, token)
-            return False  # Remaining preparation progresses in the shared tick.
-        client = client or QStash(config.qstash_token, retry=False, base_url=os.environ.get("QSTASH_URL") or None)
-        client.message.publish_json(url=config.sync_url, body={"feed": feed, "bootstrap": batches, "job_token": token},
-                                    retries=2, timeout="60s", delay="2s")
+            return False  # A later client request can retry after the daily reset.
+        # The SDK has a ten-minute read timeout. Enqueueing on an RSS request
+        # instead needs a short timeout, independent of the job's 60s timeout.
+        endpoint = (os.environ.get("QSTASH_URL") or "https://qstash.upstash.io").rstrip("/")
+        with session.post(endpoint + "/v2/publish/" + config.sync_url,
+                          headers={"Authorization": "Bearer " + config.qstash_token, "Content-Type": "application/json",
+                                   "Upstash-Method": "POST", "Upstash-Retries": "2", "Upstash-Timeout": "60s", "Upstash-Delay": "2s"},
+                          json={"feed": feed, "bootstrap": batches, "job_token": token},
+                          timeout=(0.5, 1.5), allow_redirects=False) as response:
+            if not 200 <= response.status_code < 300:
+                raise requests.HTTPError("Enqueue failed")
         return True
     except Exception:
         store.command("EVAL", RELEASE, 1, key, token)
-        return False  # The shared tick will recover work if delivery is unavailable.
+        return False  # A later client request recovers unavailable delivery.
 
 
 def continue_work(config, store, feed, batches, token):
@@ -147,7 +164,7 @@ def continue_work(config, store, feed, batches, token):
 
 
 def run_tick(config, store, source_factory, clock=time.time, monotonic=time.monotonic):
-    """One recurring QStash delivery refreshes due feeds within a shared budget."""
+    """Only the main feed gets recurring work, including after old-index migration."""
     token = store.acquire("@shared-tick")
     if not token:
         return {"state": "already_running"}
@@ -157,31 +174,20 @@ def run_tick(config, store, source_factory, clock=time.time, monotonic=time.mono
     source = None
     results = []
     try:
-        for feed in config.feeds:
+        for feed in (DEFAULT_FEED,) if DEFAULT_FEED in config.feeds else ():
             if not registry.get(feed):
                 registry.register(feed, now=now)
-        due = registry.due(now)
-        # Existing configured feeds keep their five-minute refresh and migration gate.
-        due = [f for f in config.feeds if f in due] + [f for f in due if f not in config.feeds]
-        for feed in due:
+            due_at = float(store.command("ZSCORE", registry.prefix + "due", feed) or 0)
+            if due_at > now:
+                continue
             remaining = int(deadline - monotonic())
             if remaining < 15:
                 break
-            record = registry.get(feed)
-            if not record:
-                continue
-            last_seen = float(store.command("ZSCORE", registry.prefix + "active", feed) or 0)
-            if record["automatic"] and last_seen < now - 30 * 86400:
-                registry.later(feed, now + 86400)
-                continue
             try:
                 source = source or source_factory()
-                result = Synchronizer(replace(config, budget_seconds=remaining), store, source, clock=clock, monotonic=monotonic).run(feed, activate=record["automatic"])
+                result = Synchronizer(replace(config, budget_seconds=remaining), store, source, clock=clock, monotonic=monotonic).run(feed)
                 results.append({"feed": feed, "state": result["state"]})
-                status = store.status(feed)
-                retry = status.get("retry_at", 0)
-                delay = 300 if not record["automatic"] or status.get("has_more") or (retry and retry <= now) else config.auto_refresh_seconds
-                registry.later(feed, now + delay)
+                registry.later(feed, now + 300)
             except (SourceError, StorageError):
                 results.append({"feed": feed, "state": "retrying"})
                 registry.later(feed, now + 300)

@@ -27,7 +27,7 @@
 </div>
 <p class="small"><a id="source" target="_blank" rel="noopener">View the SoundCloud page ↗</a></p>
 </section>
-<footer>Up to 200 playable episodes. A new feed starts with a few and grows automatically. Audio comes directly from SoundCloud; private pages and sets without a full MP3 are unavailable.<br><a href="/about">Your existing ACSv3 feed and subscription help</a></footer>
+<footer>Up to 200 playable episodes. A new feed starts with a few and grows automatically. Other feeds refresh when this page or a podcast app requests them; unused feeds stay saved without background checks. Audio comes directly from SoundCloud; private pages and sets without a full MP3 are unavailable.<br><a href="/about">Your existing ACSv3 feed and subscription help</a></footer>
 </main>
 <script>
 const $=id=>document.getElementById(id);let timer=null,generation=0;
@@ -36,16 +36,17 @@ function show(data){
  if(data.image){$('cover').src=data.image;$('cover').hidden=false}else{$('cover').hidden=true}
  $('progress').max=data.target;$('progress').value=data.count;$('progress').hidden=data.count>0&&!data.more;
  $('status').textContent=data.count?`${data.count} episodes ready`:'Preparing the first playable sets';
- $('detail').textContent=data.error?'SoundCloud could not be read. We’ll retry automatically; check that the source page is public.':data.count?(data.more?'You can subscribe now. More episodes will appear at this same URL as the archive fills in.':'Your feed is ready. New additions will appear automatically.'):(data.checked?'No playable sets yet. Some SoundCloud sets do not offer a full MP3. We’ll keep checking.':'You can leave this page open while we prepare the first episodes. There’s no setup to do.');
+ $('detail').textContent=data.error?'SoundCloud could not be read. Check that the page is public; leave this open to retry.':data.count?(data.more?'You can subscribe now. More episodes will appear at this same URL as the archive fills in.':'Your feed is ready. New additions appear as your podcast app checks for updates.'):(data.checked?'No playable sets yet. Some SoundCloud sets do not offer a full MP3. Leave this page open to keep checking.':'You can leave this page open while we prepare the first episodes. There’s no setup to do.');
  $('subscribe').hidden=!data.count;$('feed-url').value=data.feed_url;$('overcast').href='overcast://x-callback-url/add?url='+encodeURIComponent(data.feed_url);
 }
 async function poll(feed,run){
- try{const r=await fetch('/api/feeds?source='+encodeURIComponent(feed));const data=await r.json();if(run!==generation)return;if(!r.ok)throw Error(data.error||'Unable to read progress.');show(data);if(data.checked&&!data.more)return}catch(e){if(run!==generation)return;$('detail').textContent='Connection interrupted. Retrying shortly…'}
- timer=setTimeout(()=>poll(feed,run),5000);
+ let delay=5000;
+ try{const r=await fetch('/api/feeds?source='+encodeURIComponent(feed));const data=await r.json();if(run!==generation)return;if(!r.ok)throw Error(data.error||'Unable to read progress.');show(data);if(data.count&&!data.more&&!data.error)return;if(data.error||(data.checked&&!data.more))delay=60000}catch(e){if(run!==generation)return;$('detail').textContent='Connection interrupted. Retrying shortly…'}
+ timer=setTimeout(()=>poll(feed,run),delay);
 }
 $('form').addEventListener('submit',async e=>{
  e.preventDefault();clearTimeout(timer);const run=++generation;$('submit').disabled=true;$('error').hidden=true;$('result').hidden=true;
- try{const r=await fetch('/api/feeds',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:$('url').value})});const data=await r.json();if(!r.ok)throw Error(data.error||'Could not create the feed. Please try again.');if(run!==generation)return;show(data);history.replaceState(null,'','/add?source='+encodeURIComponent(data.feed));if(!data.count||data.more)timer=setTimeout(()=>poll(data.feed,run),3000)}catch(e){$('error').textContent=e.message;$('error').hidden=false}finally{$('submit').disabled=false}
+ try{const r=await fetch('/api/feeds',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:$('url').value})});const data=await r.json();if(!r.ok)throw Error(data.error||'Could not create the feed. Please try again.');if(run!==generation)return;show(data);history.replaceState(null,'','/add?source='+encodeURIComponent(data.feed));if(!data.count||data.more||data.error)timer=setTimeout(()=>poll(data.feed,run),3000)}catch(e){$('error').textContent=e.message;$('error').hidden=false}finally{$('submit').disabled=false}
 });
 $('copy').addEventListener('click',async()=>{try{await navigator.clipboard.writeText($('feed-url').value);$('copy').textContent='Copied';setTimeout(()=>$('copy').textContent='Copy feed URL',2000)}catch(e){$('feed-url').select();$('copy').textContent='Select and copy the link below'}});
 const initial=new URLSearchParams(location.search).get('source');if(initial){$('url').value=initial;$('form').requestSubmit()}

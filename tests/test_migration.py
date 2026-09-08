@@ -129,3 +129,6 @@ def test_shared_schedule_reuses_existing_id_without_requiring_a_new_bootstrap(co
     assert calls[0]["schedule_id"] == result["schedule_id"]
     assert json.loads(calls[0]["body"]) == {"tick": True}
     assert store.manifest(feed) is None  # Scheduling cannot publish an unmigrated feed.
+    with pytest.raises(ValueError, match="Only the main feed"):
+        schedule(config, store, "secondary/tracks", "create", SimpleNamespace(schedule=api), shared=True)
+    assert len(calls) == 1

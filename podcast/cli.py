@@ -28,6 +28,8 @@ def schedule(config, store, feed, action, client=None, shared=False):
     client = client or QStash(config.qstash_token, retry=False, base_url=os.environ.get("QSTASH_URL") or None)
     ident = schedule_id(config, feed)
     if action == "create":
+        if feed != DEFAULT_FEED:
+            raise ValueError("Only the main feed uses a recurring schedule; other feeds refresh on request")
         if not shared and (not store.manifest(feed) or not store.state(feed).get("rollout_ready")):
             raise ValueError("Publish and verify the initial snapshot before enabling its schedule")
         client.schedule.create(destination=config.sync_url, cron="*/5 * * * *", body=json.dumps({"tick": True} if shared else {"feed": feed}),
@@ -44,7 +46,7 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("seed", help="Preserve dates and IDs from the existing live feed")
     sub.add_parser("status")
-    sub.add_parser("tick", help="Run one bounded shared refresh tick")
+    sub.add_parser("tick", help="Run one bounded refresh tick for the main feed")
     sync = sub.add_parser("sync", help="Prepare metadata/audio in bounded batches")
     sync.add_argument("--runs", type=int, default=1)
     export = sub.add_parser("export", help="Export candidate RSS and historical-announcement identities")
@@ -57,7 +59,7 @@ def main(argv=None):
     pub.add_argument("--minimum-items", type=int, help="Explicitly accept fewer than FEED_MAX_ITEMS")
     sched = sub.add_parser("schedule")
     sched.add_argument("action", choices=("create", "status", "pause"))
-    sched.add_argument("--shared", action="store_true", help="Use this existing schedule for all automatically registered sources")
+    sched.add_argument("--shared", action="store_true", help="Compatibility option: use the tick endpoint, which now refreshes only the main feed")
     args = parser.parse_args(argv)
     try:
         config = Config.from_env()

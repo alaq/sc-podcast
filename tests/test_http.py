@@ -7,15 +7,19 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from dataclasses import replace
 from http.server import ThreadingHTTPServer
+from types import SimpleNamespace
 
 import jwt
 import pytest
 
 from podcast.http import Handler
 from podcast.migrate import publish
+from podcast.registry import Registry, request_work
 from podcast.sync import Synchronizer
+from conftest import Source, track
 
 
 @pytest.fixture
@@ -123,6 +127,53 @@ def test_registration_rejects_external_urls_and_cross_origin_requests(server):
     assert request("POST", "/api/feeds", '{"url":"https://example.com/collect"}')[0] == 400
     assert request("POST", "/api/feeds", '{"url":"robot-heart"}', {"Origin": "https://example.com"})[0] == 403
     assert request(path="/api/feeds?source=not-added/likes")[0] == 404
+
+
+@pytest.mark.parametrize("method,path,conditional", [
+    ("GET", "/secondary/tracks", False),
+    ("HEAD", "/secondary/tracks", False),
+    ("GET", "/secondary/tracks", True),
+    ("GET", "/api/feeds?source=secondary/tracks", False),
+])
+def test_secondary_requests_enqueue_stale_work_without_extracting(server, store, source, monkeypatch, method, path, conditional):
+    request, config = server
+    feed = "secondary/tracks"
+    Registry(config, store).register(feed)
+    Synchronizer(config, store, Source([track(1), track(2)])).run(feed, activate=True)
+    initial = request(path="/secondary/tracks")
+    status = store.status(feed)
+    status.update(last_success_at=int(time.time()) - 3600, last_checked_at=int(time.time()) - 3600)
+    store.command("SET", store.key(feed, "status"), json.dumps(status))
+    sent = []
+    monkeypatch.setattr("podcast.registry.requests.post", lambda *a, **kw: (sent.append(kw), nullcontext(SimpleNamespace(status_code=202)))[1])
+    monkeypatch.setattr("podcast.http.request_work", lambda c, s, f, status=None: request_work(replace(c, qstash_token="test-token"), s, f, status))
+    calls = len(source.list_calls), len(source.audio_calls)
+    headers = {"If-None-Match": initial[1]["ETag"]} if conditional else {}
+    result = request(method, path, headers=headers)
+    assert result[0] == (304 if conditional else 200)
+    assert len(sent) == 1 and sent[0]["json"]["feed"] == feed
+    assert (len(source.list_calls), len(source.audio_calls)) == calls
+    assert request(path="/secondary/tracks")[2] == initial[2]
+    assert len(sent) == 1
+
+
+def test_queue_outage_preserves_stale_secondary_rss(server, store, monkeypatch):
+    import requests
+    request, config = server
+    feed = "secondary/tracks"
+    Registry(config, store).register(feed)
+    Synchronizer(config, store, Source([track(1)])).run(feed, activate=True)
+    initial = request(path="/secondary/tracks")
+    status = store.status(feed)
+    status.update(last_success_at=1, last_checked_at=1)
+    store.command("SET", store.key(feed, "status"), json.dumps(status))
+    def fail(*a, **kw):
+        assert kw["timeout"] == (0.5, 1.5)
+        raise requests.Timeout("Queue unavailable")
+    monkeypatch.setattr("podcast.registry.requests.post", fail)
+    monkeypatch.setattr("podcast.http.request_work", lambda c, s, f, status=None: request_work(replace(c, qstash_token="test-token"), s, f, status))
+    result = request(path="/secondary/tracks")
+    assert result[0] == 200 and result[2] == initial[2]
 
 
 def signature(config, raw, key=None, **claims):
