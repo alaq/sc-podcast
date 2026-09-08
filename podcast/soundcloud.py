@@ -13,12 +13,34 @@ from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 import requests
 import yt_dlp
 from yt_dlp.extractor.soundcloud import SoundcloudUserIE
+from yt_dlp.networking import Request
 
 from podcast.artwork import episode_artwork
 
 
 class SourceError(RuntimeError):
     pass
+
+
+class SourceDeadline(SourceError):
+    pass
+
+
+class DeadlineYoutubeDL(yt_dlp.YoutubeDL):
+    """Bound each network operation during the first RSS request, including auth refresh."""
+    def __init__(self, options, deadline=None):
+        self.deadline = deadline
+        super().__init__(options)
+
+    def urlopen(self, req):
+        if self.deadline is not None:
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                raise SourceDeadline("Initial preparation budget exhausted")
+            if isinstance(req, str):
+                req = Request(req)
+            req.extensions["timeout"] = min(1.5, remaining)
+        return super().urlopen(req)
 
 
 class QuietLogger:
@@ -99,10 +121,11 @@ def signed_url_expiry(url):
 
 
 class SoundCloud:
-    def __init__(self, session=None):
+    def __init__(self, session=None, *, deadline=None):
+        self.deadline = deadline
         self.session = session or requests.Session()
-        self.ydl = yt_dlp.YoutubeDL({"quiet": True, "logger": QuietLogger(), "socket_timeout": 5,
-                                   "retries": 0, "extractor_retries": 0, "cachedir": "/tmp/sc-podcast-yt-dlp"})
+        self.ydl = DeadlineYoutubeDL({"quiet": True, "logger": QuietLogger(), "socket_timeout": 5,
+                                     "retries": 0, "extractor_retries": 0, "cachedir": "/tmp/sc-podcast-yt-dlp"}, deadline)
         self.ie = SoundcloudUserIE(self.ydl)
         try:
             self.ie.initialize()
@@ -115,11 +138,15 @@ class SoundCloud:
         self.session.close()
 
     def api(self, url, **kwargs):
+        if getattr(self, "deadline", None) is not None and time.monotonic() >= self.deadline:
+            raise SourceDeadline("Initial preparation budget exhausted")
         if urlsplit(url).scheme != "https" or urlsplit(url).hostname != "api-v2.soundcloud.com":
             raise SourceError("Unexpected SoundCloud endpoint")
         try:
             return self.ie._call_api(url, "podcast", headers=self.ie._HEADERS, **kwargs)
         except Exception as exc:
+            if getattr(self, "deadline", None) is not None and time.monotonic() >= self.deadline:
+                raise SourceDeadline("Initial preparation budget exhausted") from exc
             raise SourceError("SoundCloud request failed") from exc
 
     def listing(self, feed, cursor=None):
@@ -179,6 +206,8 @@ class SoundCloud:
             raise SourceError("No full-length progressive MP3 is available")
         try:
             data = self.api(progressive)
+        except SourceDeadline:
+            raise
         except SourceError:
             # Stored transcoding endpoints can change. Re-resolve once, never loop.
             raw = self.api("https://api-v2.soundcloud.com/resolve", query={"url": track["webpage_url"]})
@@ -192,7 +221,13 @@ class SoundCloud:
         if parsed.scheme != "https" or not (parsed.hostname or "").endswith(".sndcdn.com"):
             raise SourceError("Unexpected audio host")
         try:
-            with self.session.get(url, headers={"Range": "bytes=0-0"}, timeout=(3, 5), stream=True) as response:
+            timeout = (3, 5)
+            if getattr(self, "deadline", None) is not None:
+                remaining = self.deadline - time.monotonic()
+                if remaining <= 0:
+                    raise SourceDeadline("Initial preparation budget exhausted")
+                timeout = (min(0.5, remaining / 2), min(1, remaining / 2))
+            with self.session.get(url, headers={"Range": "bytes=0-0"}, timeout=timeout, stream=True) as response:
                 response.raise_for_status()
                 mime = response.headers.get("Content-Type", "").split(";")[0]
                 content_range = response.headers.get("Content-Range", "")

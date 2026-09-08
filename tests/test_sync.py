@@ -5,7 +5,7 @@ from dataclasses import replace
 import pytest
 
 from podcast.migrate import publish
-from podcast.soundcloud import SourceError
+from podcast.soundcloud import SourceDeadline, SourceError
 from podcast.store import StorageError
 from podcast.sync import Synchronizer, build_snapshot
 from conftest import Source, track
@@ -49,6 +49,38 @@ def test_bad_track_does_not_block_good_tracks_and_can_recover(config, store, fee
     assert run(config, store, source, feed, 1800000901)["state"] == "published"
     assert store.manifest(feed) != prior
     assert store.state(feed)["tracks"]["4"]["length"]
+
+
+def test_first_batch_targets_five_successes_and_leaves_slow_fallback_for_worker(config, store):
+    source = Source([track(i) for i in range(1, 10)] + [track(10, progressive_url="")])
+    source.bad.add("9")
+    result = Synchronizer(config, store, source).run("new/tracks", initial=True, activate=True)
+    assert result["published"] == 5
+    assert source.audio_calls == ["9", "8", "7", "6", "5", "4"]
+    assert "attempts" not in store.state("new/tracks")["tracks"]["10"]
+
+
+def test_first_batch_publishes_partial_progress_at_deadline_then_resumes(config, store, monkeypatch):
+    feed = "new/tracks"
+    source = Source([track(i) for i in range(1, 11)])
+    original = source.resolve_audio
+    def limited(entry):
+        if len(source.audio_calls) == 2:
+            raise SourceDeadline("Time exhausted")
+        return original(entry)
+    monkeypatch.setattr(source, "resolve_audio", limited)
+    assert Synchronizer(config, store, source).run(feed, initial=True, activate=True)["published"] == 2
+    state = store.state(feed)
+    assert "attempts" not in state["tracks"]["8"]
+    assert store.status(feed)["retry_at"] > 0
+    first = store.manifest(feed)
+    # A racing initial reader must neither do source work nor shrink the snapshot.
+    assert Synchronizer(config, store, source).run(feed, initial=True, activate=True)["state"] == "already_published"
+    assert store.manifest(feed) == first
+    monkeypatch.setattr(source, "resolve_audio", original)
+    assert Synchronizer(config, store, source).run(feed, activate=True)["published"] == 10
+    after = store.state(feed)
+    assert all(after["tracks"][k]["published_at"] == state["tracks"][k]["published_at"] for k in ("10", "9"))
 
 
 def test_discovery_survives_process_death_and_old_snapshot_survives_source_failure(config, store, feed, monkeypatch):

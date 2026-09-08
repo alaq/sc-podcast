@@ -1,4 +1,5 @@
 import json
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import replace
@@ -6,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from podcast.registry import CapacityError, Registry, continue_work, queue_work, request_work, run_tick, source_feed
+from podcast.registry import CapacityError, Registry, continue_work, prepare_first_feed, queue_work, request_work, run_tick, source_feed
 from podcast.soundcloud import SourceError
 from podcast.sync import Synchronizer
 from conftest import Source, track
@@ -59,6 +60,68 @@ def test_new_feed_rate_limit_does_not_affect_repeat_subscriptions(config, store)
     with pytest.raises(CapacityError):
         registry.register("user-6/likes", "same-client")
     assert registry.register("user-0/likes", "same-client")["feed"] == "user-0/likes"
+
+
+def test_concurrent_registration_consumes_one_slot_per_new_source(config, store, monkeypatch):
+    registry = Registry(config, store)
+    original = registry.get
+    barrier = threading.Barrier(10)
+    def get(feed):
+        value = original(feed)
+        if not value and feed == "new/tracks":
+            barrier.wait(timeout=5)
+        return value
+    monkeypatch.setattr(registry, "get", get)
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        records = list(pool.map(lambda _: registry.register("new/tracks", "same-client"), range(10)))
+    assert all(r == records[0] for r in records)
+    for n in range(4):
+        registry.register(f"another-{n}/tracks", "same-client")
+    with pytest.raises(CapacityError):
+        registry.register("sixth/tracks", "same-client")
+
+
+def test_first_feed_saves_cursor_and_immediately_queues_continuation(config, store, monkeypatch):
+    config = replace(config, qstash_token="test-token")
+    feed = "direct/tracks"
+    Registry(config, store).register(feed)
+    source = Source(pages={None: {"entries": [track(i) for i in range(1, 11)], "next": "older", "title": "DJ"}})
+    sent = []
+    monkeypatch.setattr("podcast.registry.requests.post", lambda *a, **kw: (sent.append(kw), nullcontext(SimpleNamespace(status_code=202)))[1])
+    manifest = prepare_first_feed(config, store, feed, lambda **kw: source)
+    assert manifest["count"] == 5
+    assert source.list_calls == [None] and len(source.audio_calls) == 5
+    assert store.state(feed)["backfill_cursor"] == "older"
+    assert len(store.state(feed)["tracks"]) == 10
+    assert len(sent) == 1 and sent[0]["json"]["feed"] == feed
+    assert not request_work(config, store, feed)
+    assert len(sent) == 1
+
+
+def test_first_feed_coalesces_source_initialization_failure(config, store):
+    calls = []
+    def fail(**kw):
+        calls.append(kw)
+        raise SourceError("Initialization failed")
+    for _ in range(2):
+        assert prepare_first_feed(config, store, "failed/tracks", fail) is None
+    assert len(calls) == 1 and calls[0]["deadline"] > 0
+
+
+def test_first_reader_waits_for_worker_that_already_holds_feed_lock(config, store):
+    feed = "direct/tracks"
+    token = store.acquire(feed)
+    elapsed = [0]
+    worker = Source([track(1)])
+    def wait(seconds):
+        elapsed[0] += seconds
+        store.release(feed, token)
+        Synchronizer(config, store, worker).run(feed, activate=True)
+    source = Source()
+    result = prepare_first_feed(config, store, feed, lambda **kw: source,
+                                monotonic=lambda: elapsed[0], sleep=wait)
+    assert result["count"] == 1 and elapsed[0] == 0.25
+    assert source.list_calls == []
 
 
 def test_tick_only_touches_main_even_with_legacy_secondary_due_entries(config, store, feed):
