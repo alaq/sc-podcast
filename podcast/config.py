@@ -46,6 +46,9 @@ class Config:
     max_audio: int = 8
     budget_seconds: int = 40
     ping_overcast: bool = False
+    max_auto_feeds: int = 50
+    auto_refresh_seconds: int = 1800
+    queue_enabled: bool = True
 
     @classmethod
     def from_env(cls):
@@ -79,6 +82,9 @@ class Config:
             max_audio=max(1, min(30, int(os.environ.get("MAX_AUDIO_PREPARATIONS", "8")))),
             budget_seconds=max(5, min(45, int(os.environ.get("SYNC_BUDGET_SECONDS", "40")))),
             ping_overcast=os.environ.get("PING_OVERCAST") == "1" and os.environ.get("VERCEL_ENV") != "preview",
+            max_auto_feeds=max(1, min(500, int(os.environ.get("MAX_AUTO_FEEDS", "50")))),
+            auto_refresh_seconds=max(300, int(os.environ.get("AUTO_REFRESH_SECONDS", "1800"))),
+            queue_enabled=os.environ.get("VERCEL_ENV") != "preview",
         )
 
     def base_for_host(self, host):

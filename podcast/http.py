@@ -5,12 +5,13 @@ import hmac
 import html
 import json
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from email.utils import format_datetime, parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from urllib.parse import quote, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import requests
 from qstash import Receiver
@@ -19,6 +20,7 @@ from podcast.config import Config, DEFAULT_FEED, normalize_feed
 from podcast.soundcloud import SoundCloud, SourceError
 from podcast.store import Store, StorageError
 from podcast.sync import Synchronizer
+from podcast.registry import CapacityError, Registry, continue_work, queue_work, run_tick, source_feed
 
 LOG = logging.getLogger("sc-podcast")
 
@@ -50,6 +52,12 @@ class Handler(BaseHTTPRequestHandler):
     store_factory = staticmethod(Store)
     source_factory = staticmethod(SoundCloud)
 
+    def registration_client(self):
+        # Vercel supplies the original client IP; the Python adapter's peer may
+        # otherwise be the same internal proxy for every listener.
+        forwarded = self.headers.get("x-forwarded-for", "").split(",")[0].strip() if os.environ.get("VERCEL") else ""
+        return forwarded or self.client_address[0]
+
     def reply(self, status, body=b"", content_type="text/plain; charset=utf-8", headers=None):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
@@ -79,6 +87,14 @@ class Handler(BaseHTTPRequestHandler):
                 return
             store = self.store_factory(config)
             base = config.base_for_host(self.headers.get("Host", ""))
+            if path == "/add":
+                body = (Path(__file__).resolve().parent / "add.html").read_bytes()
+                self.reply(200, body, "text/html; charset=utf-8", {"Cache-Control": "no-store"})
+                return
+            if path == "/api/feeds":
+                feed = source_feed(parse_qs(urlsplit(self.path).query).get("source", [""])[0])
+                self.feed_progress(config, store, base, feed)
+                return
             if path.startswith("/track/"):
                 self.audio(config, store, unquote(path[len("/track/"):]))
                 return
@@ -87,11 +103,18 @@ class Handler(BaseHTTPRequestHandler):
                 return
             feed = normalize_feed(path)
             if feed not in config.feeds:
-                self.reply(404, b"This source has not been configured for synchronization.", headers={"Cache-Control": "no-store"})
-                return
+                feed = source_feed(path)
+                registry = Registry(config, store)
+                if not registry.get(feed):
+                    if self.command != "HEAD":
+                        registry.register(feed, self.registration_client())
+                        queue_work(config, store, feed)
+                else:
+                    registry.touch(feed)
             manifest = store.manifest(feed)
             if not manifest:
-                self.reply(503, b"The first feed snapshot is being prepared. Please try again later.", headers={"Retry-After": "300", "Cache-Control": "no-store"})
+                link = base + "/add?source=" + quote(feed, safe="")
+                self.reply(503, ("This feed is preparing its first playable episodes. Open " + link + " to follow progress and subscribe when ready.").encode(), headers={"Retry-After": "5", "Cache-Control": "no-store", "Link": '<' + link + '>; rel="help"'})
                 return
             variant = manifest["variants"].get(base) or manifest["variants"][config.bases[0]]
             headers = {"Cache-Control": "public, max-age=0, must-revalidate", "Vercel-CDN-Cache-Control": "public, s-maxage=300, stale-while-revalidate=60",
@@ -110,6 +133,8 @@ class Handler(BaseHTTPRequestHandler):
                 body = gzip.compress(body, mtime=0)
                 headers["Content-Encoding"] = "gzip"
             self.reply(200, body, "application/rss+xml; charset=utf-8", headers)
+        except CapacityError as exc:
+            self.reply(429, str(exc).encode(), headers={"Cache-Control": "no-store", "Retry-After": "3600"})
         except ValueError:
             self.reply(400, b"Invalid request.", headers={"Cache-Control": "no-store"})
         except (StorageError, SourceError):
@@ -163,12 +188,62 @@ class Handler(BaseHTTPRequestHandler):
 <title>ACSv3 · SoundCloud sets</title><style>body{{font:18px/1.6 system-ui;margin:10vh auto;padding:24px;max-width:640px;color:#1d252b;background:#f6f3ee}}img{{width:140px;border-radius:18px}}a{{color:#a8420b}}code{{word-break:break-all}}.muted{{color:#59626a}}</style>
 <img src="/art.png" alt="ACSv3 artwork"><h1>ACSv3</h1><p>DJ sets liked on SoundCloud, ready in your podcast app.</p>
 <p><a href="{html.escape(overcast)}">Subscribe in Overcast</a> · <a href="{html.escape(feed_url)}">RSS feed</a></p>
+<p><a href="/add">Turn another SoundCloud page into a podcast</a></p>
 <p>In Apple Podcasts, choose Follow a Show by URL and paste:</p><p><code>{html.escape(feed_url)}</code></p>
 <p class="muted">{count} episodes available. Last successful sync: {when}.</p>
 <p class="muted">{'A sync is being retried; the last saved feed remains available.' if public.get('error') else 'New Likes are checked every five minutes; your podcast app may refresh later.'}</p></html>'''
         self.reply(200, body.encode(), "text/html; charset=utf-8", {"Cache-Control": "no-store"})
 
+    def feed_progress(self, config, store, base, feed):
+        registry = Registry(config, store)
+        record = registry.get(feed)
+        if not record and feed not in config.feeds:
+            self.reply(404, b'{"error":"This feed has not been added yet."}', "application/json", {"Cache-Control": "no-store"})
+            return
+        status = store.status(feed)
+        count = status.get("published_count", 0)
+        url = base + ("/" if feed == DEFAULT_FEED else "/" + feed)
+        data = {"feed": feed, "feed_url": url, "source_url": "https://soundcloud.com/" + feed,
+                "title": "ACSv3" if feed == DEFAULT_FEED else status.get("title", feed),
+                "image": base + "/art.png" if feed == DEFAULT_FEED else status.get("image"),
+                "count": count, "target": config.max_items, "state": "ready" if count else "preparing",
+                "checked": status.get("last_checked_at"), "error": status.get("error"),
+                "unavailable": status.get("unavailable_count", 0),
+                "more": bool(status.get("has_more") or (status.get("retry_at", 0) and status["retry_at"] <= time.time()))}
+        self.reply(200, json.dumps(data).encode(), "application/json", {"Cache-Control": "no-store"})
+
+    def register_feed(self):
+        try:
+            config = self.config_factory()
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 4096:
+                self.reply(413, headers={"Cache-Control": "no-store"})
+                return
+            # Only same-origin browser writes; direct API clients may omit Origin.
+            origin = self.headers.get("Origin")
+            if origin and urlsplit(origin).netloc != self.headers.get("Host"):
+                self.reply(403, headers={"Cache-Control": "no-store"})
+                return
+            data = json.loads(self.rfile.read(length))
+            feed = source_feed(data.get("url", ""))
+            store = self.store_factory(config)
+            Registry(config, store).register(feed, self.registration_client())
+            status = store.status(feed)
+            if not status.get("last_success_at"):
+                queue_work(config, store, feed)
+            self.feed_progress(config, store, config.base_for_host(self.headers.get("Host", "")), feed)
+        except CapacityError as exc:
+            self.reply(429, json.dumps({"error": str(exc)}).encode(), "application/json", {"Cache-Control": "no-store", "Retry-After": "3600"})
+        except (ValueError, TypeError, AttributeError) as exc:
+            message = str(exc) if type(exc) is ValueError else "Enter a public SoundCloud page URL."
+            self.reply(400, json.dumps({"error": message}).encode(), "application/json", {"Cache-Control": "no-store"})
+        except StorageError:
+            self.reply(503, b'{"error":"Could not prepare this feed. Please try again shortly."}', "application/json", {"Cache-Control": "no-store"})
+
     def do_POST(self):
+        if self.path == "/api/feeds":
+            self.register_feed()
+            return
         if urlsplit(self.path).path != "/api/sync" or urlsplit(self.path).query:
             self.reply(404, headers={"Cache-Control": "no-store"})
             return
@@ -190,16 +265,28 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(401, b"Unauthorized", headers={"Cache-Control": "no-store"})
                 return
             data = json.loads(raw or "{}")
+            store = self.store_factory(config)
+            if data.get("tick") is True:
+                result = run_tick(config, store, self.source_factory)
+                self.reply(200, json.dumps(result).encode(), "application/json", {"Cache-Control": "no-store"})
+                return
             feed = normalize_feed(data.get("feed", DEFAULT_FEED))
-            if feed not in config.feeds:
+            registration = Registry(config, store).get(feed)
+            if feed not in config.feeds and not registration:
                 self.reply(400, b"Unknown configured feed", headers={"Cache-Control": "no-store"})
                 return
-            store = self.store_factory(config)
             source = self.source_factory()
             try:
-                result = Synchronizer(config, store, source).run(feed)
+                result = Synchronizer(config, store, source).run(feed, activate=bool(registration and registration["automatic"]))
             finally:
                 source.close()
+            if registration:
+                status = store.status(feed)
+                retry = status.get("retry_at", 0)
+                pending = status.get("has_more") or (retry and retry <= time.time())
+                Registry(config, store).later(feed, time.time() + (300 if feed in config.feeds or pending else config.auto_refresh_seconds))
+            if data.get("job_token"):
+                continue_work(config, store, feed, max(1, min(25, int(data.get("bootstrap", 1)))), str(data["job_token"]))
             if result["state"] == "published" and config.ping_overcast:
                 for base in config.bases:
                     try:
