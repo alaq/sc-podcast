@@ -22,25 +22,27 @@ Previously discovered sets remain in the archive; unliking does not retract a pu
 2. The page creates a shared, stable feed URL and displays preparation progress. Subscription controls appear once the first real playable episodes are published.
 3. Subscribe immediately; the archive grows in background batches toward 200 episodes. Adding the same source again reuses its feed, even across listeners.
 
-Requesting a new RSS path such as `/robot-heart/tracks` also starts registration automatically. While its first episodes are pending, it returns a fast `503` with `Retry-After: 5` and a preparation-page link. Some podcast apps reject a brand-new empty/pending feed, so use `/add` for reliable first-time subscription. Once ready, feed reads only retrieve the saved snapshot.
+Requesting a new RSS path such as `/robot-heart/tracks` also starts registration automatically. While its first episodes are pending, it returns a fast `503` with `Retry-After: 5` and a preparation-page link. Some podcast apps reject a brand-new empty/pending feed, so use `/add` for reliable first-time subscription. Once ready, feed reads return the saved snapshot and may enqueue a bounded refresh when it is due; they never wait for SoundCloud extraction.
 
-One shared five-minute scheduler services registered feeds. Configured `SC_FEEDS` retain their five-minute cadence and existing migration gate; new sources normally refresh every 30 minutes, with extra work during initial preparation. Automatically added feeds with no origin requests for 30 days pause polling and resume when requested again. Metadata and URLs are retained.
+Only the main ACSv3 feed uses the five-minute scheduler. Every other feed refreshes on demand: a request to its RSS URL (including HEAD or conditional 304 requests), registration page, or progress API can enqueue work if its last successful check is at least 30 minutes old. Incomplete preparation can resume sooner. No more requests means no more refreshes after the already-started, bounded preparation burst finishes; metadata, saved RSS and URLs remain available. An unsubscribe is not observable directly: an app or crawler that continues polling still counts as demand.
 
-The first addition can queue up to 25 short background batches. Per-feed leases coalesce concurrent requests, and a 500-message daily bootstrap budget leaves room for the shared schedule; remaining preparation continues through scheduled ticks. Each retry still consumes QStash allowance. The default service limit is 50 automatically registered feeds and five new registrations per client IP per hour. Reopening an existing feed does not count toward that rate. These bounds prevent an anonymous endpoint from creating unlimited paid work.
+The first request after an idle period gets the saved feed while a one-off QStash job checks SoundCloud. A subsequent client poll sees any updates. The CDN can serve requests for five minutes before the next origin request; this delays demand detection slightly but does not generate periodic work itself. Enqueueing uses short connection/read timeouts, and a queue outage does not prevent a saved RSS response. A one-minute per-source cooldown prevents failed requests or rapid progress polling from repeatedly enqueueing work.
+
+Each request-triggered burst can queue up to 25 short background batches, stopping once preparation is complete. Per-feed leases coalesce concurrent requests. A 500-message daily budget covers all secondary-feed refresh and preparation enqueues, leaving room for the main schedule; if it is exhausted, later client requests resume work after the UTC daily reset. Each retry still consumes QStash allowance. The default service limit is 50 automatically registered feeds and five new registrations per client IP per hour. Reopening an existing feed does not count toward that rate. These bounds prevent an anonymous endpoint from creating unlimited paid work.
 
 ## Architecture
 
 ```text
-Add URL → Redis registration → bounded QStash preparation batches
-QStash (one shared 5 min tick) → due feeds → SoundCloud discovery + bounded audio preparation
-                                     ↓ atomic publication
+Main feed: QStash (every 5 min) → SoundCloud sync → atomic RSS publication
+Other feeds: client request → saved RSS + one-off QStash work when due
+Add URL / progress page → Redis registration + bounded preparation batches
 Podcast app → Vercel CDN → Redis manifest + saved RSS
 Podcast app → /track/artist/set → temporary 302 → SoundCloud MP3 CDN
 ```
 
 Redis holds compressed discovery state, fixed publication dates, permanent track-path mappings, current/previous RSS snapshots, and a two-minute cache of signed audio URLs. Audio files are never stored or proxied. The existing `KV_REST_API_*` variables work; the service is now Upstash Redis following Vercel KV's migration.
 
-Feed responses support `HEAD`, gzip, ETags and `Last-Modified`. Unchanged conditional requests only read the small manifest. Snapshot publication is atomic and guarded by an expiring lock with an ownership check. Failed discovery/preparation leaves the previous feed available. A Redis outage can still affect an uncached origin read; the CDN is a cache, not an independent durable replica.
+Feed responses support `HEAD`, gzip, ETags and `Last-Modified`. Unchanged conditional requests avoid reading the large RSS body; secondary feeds also read their small status record to decide whether to enqueue work. Snapshot publication is atomic and guarded by an expiring lock with an ownership check. Failed discovery/preparation leaves the previous feed available. A Redis outage can still affect an uncached origin read; the CDN is a cache, not an independent durable replica.
 
 Sync saves discovered metadata before audio preparation, processes at most one extra listing page and eight audio items per invocation, and resumes after interruption. Retryable tracks use backoff. Unchanged checks do not fetch the large saved state. The yt-dlp SoundCloud adapter is isolated in `podcast/soundcloud.py` and pinned because it uses extractor internals.
 
@@ -59,20 +61,20 @@ Fill `.env` locally; it is gitignored. Configure the same variables in Vercel:
 | Variable | Purpose |
 | --- | --- |
 | `KV_REST_API_URL`, `KV_REST_API_TOKEN` | Existing Upstash database REST connection; `UPSTASH_REDIS_REST_*` aliases also work |
-| `SC_FEEDS` | Existing configured feeds to keep on five-minute refreshes, default `kado-nyc/likes`; new sources register automatically |
+| `SC_FEEDS` | Legacy configured feeds with publication gates, default `kado-nyc/likes`; only the main feed is scheduled and new sources register automatically |
 | `PUBLIC_BASE_URLS` | Origins to preserve in enclosures, default both existing domains |
 | `SC_PODCAST_NAMESPACE` | Isolated key prefix, default `sc-podcast:v2`; existing timestamp keys are read without modification |
 | `FEED_MAX_ITEMS` | Default 200 |
 | `SYNC_SECRET` | Random bearer credential for manual sync requests |
 | `QSTASH_CURRENT_SIGNING_KEY`, `QSTASH_NEXT_SIGNING_KEY` | Validate scheduled requests and key rotation |
 | `QSTASH_TOKEN` | Schedule management and automatic background preparation |
-| `QSTASH_URL` | Optional regional QStash API origin for the CLI, as shown in your console |
+| `QSTASH_URL` | Optional regional QStash API origin for enqueueing and the CLI, as shown in your console |
 | `SYNC_URL` | Exact public `/api/sync` URL used as the QStash JWT audience |
 | `MAX_AUDIO_PREPARATIONS`, `SYNC_BUDGET_SECONDS` | Default eight preparations and a 40-second soft work budget, within Vercel's 60-second function limit |
 | `MAX_AUTO_FEEDS` | Maximum automatically registered sources, default 50 |
-| `AUTO_REFRESH_SECONDS` | Normal refresh interval for new sources, default 1800 seconds |
+| `AUTO_REFRESH_SECONDS` | Minimum age for a normal request-triggered refresh, default 1800 seconds; incomplete preparation can resume sooner |
 
-New sources do not need an allowlist edit, manual publication or their own schedule. At deployment, update the existing recurring job once with `podcast.cli schedule create --shared`. This reuses the existing schedule ID, changes its body to `{"tick":true}`, and keeps the existing feed's publication gate intact. `podcast.cli tick` runs one tick manually. On rollback to code without the registry, restore a per-feed schedule with `podcast.cli schedule create`.
+New sources do not need an allowlist edit, manual publication or any recurring schedule. Use `podcast.cli schedule create` for the main feed only. If upgrading from the shared-tick deployment, this updates the same existing schedule ID to `{"feed":"kado-nyc/likes"}`. The old `{"tick":true}` endpoint and `--shared` option remain compatible but now process only the main feed, ignoring historical secondary entries in the due index. `podcast.cli tick` also refreshes only the main feed. Snapshot and registration keys require no migration.
 
 Preview deployments automatically append a branch hash to the Redis namespace and disable Overcast pings and background-message dispatch. To prepare that same namespace locally, use `VERCEL_ENV=preview` and the branch name in `VERCEL_GIT_COMMIT_REF`, then `podcast.cli --feed source/tracks sync` after registering through the preview page. For browser testing, include the preview origin in `PUBLIC_BASE_URLS`. Keep its `SYNC_URL` consistent with the deployment when testing signed requests, and account for deployment protection. Preview registration never queues production jobs.
 
@@ -104,7 +106,7 @@ Do this against the new production namespace **while the old deployment is still
 5. Create/update the schedule and read it back:
 
    ```sh
-   .venv/bin/python -m podcast.cli schedule create --shared
+   .venv/bin/python -m podcast.cli schedule create
    .venv/bin/python -m podcast.cli schedule status
    ```
 
@@ -122,14 +124,14 @@ Automatically registered sources publish incrementally as soon as real episodes 
 
 The tests use synthetic SoundCloud responses and execute actual Redis commands/Lua through fakeredis. They cover 200-episode batching, interrupted work, pagination gaps, unavailable-track recovery, locking, old-snapshot preservation, conditional responses, concurrent readers, JWT authentication, and SQLite migration retries. Test runs do not need service credentials or send messages. Live source probes and hosted deployment checks remain separate.
 
-`GET /status` exposes default-feed timestamps and counts. `POST /api/feeds` accepts a public SoundCloud `url`; `GET /api/feeds?source=user/tracks` returns preparation progress. `POST /api/sync` accepts `{"tick":true}` for shared work or `{"feed":"kado-nyc/likes"}` for one feed, with a QStash signature or the manual bearer credential. Keep tokens out of command history and request logs. `PING_OVERCAST` remains off; the shared tick does not send pings.
+`GET /status` exposes default-feed timestamps and counts. `POST /api/feeds` accepts a public SoundCloud `url`; `GET /api/feeds?source=user/tracks` returns preparation progress. `POST /api/sync` accepts `{"tick":true}` for main-feed work or `{"feed":"kado-nyc/likes"}` for one feed, with a QStash signature or the manual bearer credential. Keep tokens out of command history and request logs. `PING_OVERCAST` remains off; the main-feed tick does not send pings.
 
 ## Cost for ten listeners
 
 Reuse the existing database and Vercel plan. One five-minute QStash schedule is **288 deliveries/day** (at most 864 with both retries every time), within the current 1,000/day free allowance before unrelated usage. Redis Free currently includes 256 MB, 500K commands/month, and 10 GB bandwidth. Redis PAYG is $0.20/100K commands; the ten-listener estimate of roughly 130K–245K monthly commands is about **$0.26–$0.49 in command charges** if paid. Storage is metadata/XML, and listeners download audio directly from SoundCloud.
 
-These are planning estimates for the original single source, not an account bill or a promise for unlimited sources. The shared recurring schedule still uses 288 initial messages/day regardless of source count, plus bounded preparation messages and retries. Ten new 200-episode sources can require approximately 250 preparation messages if all batches fill; metadata commands and function work also grow with distinct sources. Client polling varies; gzip, CDN reuse and validators reduce Redis bandwidth. Check account-wide usage after rollout. No plan upgrade is required by this change. Prices verified 2026-09-05, QStash rechecked 2026-09-07: [Upstash Redis](https://upstash.com/pricing/redis), [QStash](https://upstash.com/pricing/qstash), [Vercel cron limits](https://vercel.com/docs/cron-jobs/usage-and-pricing).
+These are planning estimates for the original single source, not an account bill or a promise for unlimited sources. The main recurring schedule still uses 288 initial messages/day. Secondary sources only consume refresh/preparation messages when requested: ten continuously polled, unchanged sources checked every 30 minutes would add about 480 initial messages/day; sources nobody requests add none. Initial 200-episode preparation can add about 25 messages per source. The shared 500-enqueue daily cap bounds secondary work across refreshes and preparation, with retries additional; a busy first day can defer some preparation until new requests arrive after the reset. Metadata commands and function work grow with distinct active sources. Client polling varies; gzip, CDN reuse and validators reduce Redis bandwidth. Check account-wide usage after rollout. No plan upgrade is required by this change. Prices verified 2026-09-05, QStash rechecked 2026-09-07: [Upstash Redis](https://upstash.com/pricing/redis), [QStash](https://upstash.com/pricing/qstash), [Vercel cron limits](https://vercel.com/docs/cron-jobs/usage-and-pricing).
 
 ## Rollback
 
-Pause this schedule with `podcast.cli schedule pause` and restore the previous Vercel deployment. Keep the new Redis namespace and SQLite baseline: deleting either is unnecessary and could cause duplicate historical announcements. The new code does not change legacy timestamp keys. Resume only after the prepared snapshot and deployment agree. Monitor stale `last_success_at` and failed QStash deliveries rather than silently replacing a good RSS feed with an empty one.
+Keep the recurring schedule addressed directly to the main feed when rolling back to the earlier shared-tick code; otherwise that code will resume periodic secondary refreshes. For a full scheduler rollback, pause it with `podcast.cli schedule pause` and restore the previous Vercel deployment. Keep the new Redis namespace and SQLite baseline: deleting either is unnecessary and could cause duplicate historical announcements. The new code does not change legacy timestamp keys. Resume only after the prepared snapshot and deployment agree. Monitor stale `last_success_at` and failed QStash deliveries rather than silently replacing a good RSS feed with an empty one.

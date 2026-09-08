@@ -20,7 +20,7 @@ from podcast.config import Config, DEFAULT_FEED, normalize_feed
 from podcast.soundcloud import SoundCloud, SourceError
 from podcast.store import Store, StorageError
 from podcast.sync import Synchronizer
-from podcast.registry import CapacityError, Registry, continue_work, queue_work, run_tick, source_feed
+from podcast.registry import CapacityError, Registry, continue_work, request_work, run_tick, source_feed
 
 LOG = logging.getLogger("sc-podcast")
 
@@ -102,15 +102,20 @@ class Handler(BaseHTTPRequestHandler):
                 self.about(config, store, base, path == "/status")
                 return
             feed = normalize_feed(path)
+            registered = feed in config.feeds
             if feed not in config.feeds:
                 feed = source_feed(path)
                 registry = Registry(config, store)
                 if not registry.get(feed):
                     if self.command != "HEAD":
                         registry.register(feed, self.registration_client())
-                        queue_work(config, store, feed)
+                        registered = True
                 else:
-                    registry.touch(feed)
+                    registered = True
+            # Conditional and HEAD requests count as demand too. This only
+            # queues bounded work; RSS reads never wait on SoundCloud extraction.
+            if registered:
+                request_work(config, store, feed)
             manifest = store.manifest(feed)
             if not manifest:
                 link = base + "/add?source=" + quote(feed, safe="")
@@ -201,6 +206,7 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(404, b'{"error":"This feed has not been added yet."}', "application/json", {"Cache-Control": "no-store"})
             return
         status = store.status(feed)
+        request_work(config, store, feed, status)
         count = status.get("published_count", 0)
         url = base + ("/" if feed == DEFAULT_FEED else "/" + feed)
         data = {"feed": feed, "feed_url": url, "source_url": "https://soundcloud.com/" + feed,
@@ -228,9 +234,6 @@ class Handler(BaseHTTPRequestHandler):
             feed = source_feed(data.get("url", ""))
             store = self.store_factory(config)
             Registry(config, store).register(feed, self.registration_client())
-            status = store.status(feed)
-            if not status.get("last_success_at"):
-                queue_work(config, store, feed)
             self.feed_progress(config, store, config.base_for_host(self.headers.get("Host", "")), feed)
         except CapacityError as exc:
             self.reply(429, json.dumps({"error": str(exc)}).encode(), "application/json", {"Cache-Control": "no-store", "Retry-After": "3600"})
@@ -280,11 +283,8 @@ class Handler(BaseHTTPRequestHandler):
                 result = Synchronizer(config, store, source).run(feed, activate=bool(registration and registration["automatic"]))
             finally:
                 source.close()
-            if registration:
-                status = store.status(feed)
-                retry = status.get("retry_at", 0)
-                pending = status.get("has_more") or (retry and retry <= time.time())
-                Registry(config, store).later(feed, time.time() + (300 if feed in config.feeds or pending else config.auto_refresh_seconds))
+            if feed == DEFAULT_FEED:
+                Registry(config, store).later(feed, time.time() + 300)
             if data.get("job_token"):
                 continue_work(config, store, feed, max(1, min(25, int(data.get("bootstrap", 1)))), str(data["job_token"]))
             if result["state"] == "published" and config.ping_overcast:
