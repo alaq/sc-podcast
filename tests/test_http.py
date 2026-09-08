@@ -94,6 +94,9 @@ def test_unknown_sources_and_public_status(server):
     assert status == 200 and json.loads(body)["published_count"] == 8
     page = request(path="/about")[2].decode()
     assert "overcast://" in page and "Follow a Show by URL" in page
+    assert 'href="/add' not in page and "add it directly in your podcast app" in page
+    assert request(path="/add")[0] == 404
+    assert request("HEAD", "/add/?source=robot-heart/tracks")[0] == 404
     assert request(path="/art.png")[0] == 200
 
 
@@ -118,7 +121,6 @@ def test_new_source_prepares_incrementally_and_reuses_subscription(server, sourc
     assert repeat["count"] == 13 and repeat["feed_url"] == data["feed_url"]
     assert request()[2] == before
     assert json.loads(request(path="/api/feeds?source=robot-heart/tracks")[2])["state"] == "ready"
-    assert b"Create podcast feed" in request(path="/add")[2]
 
 
 def test_registration_rejects_external_urls_and_cross_origin_requests(server):
@@ -170,6 +172,7 @@ def test_cold_source_failure_is_retryable_without_empty_feed_or_repeated_extract
     for _ in range(2):
         status, headers, body = request(path="/offline/tracks")
         assert status == 503 and headers["Retry-After"] == "5"
+        assert "Link" not in headers
         assert b"<rss" not in body and b"request this feed again" in body
     assert len(source.list_calls) == calls + 1
 

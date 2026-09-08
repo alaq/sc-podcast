@@ -8,7 +8,7 @@ RSS requests normally read a prepared snapshot from Upstash Redis. For a brand-n
 
 - Feed: `https://sc-podcast.vercel.app/` (also `https://podcast.alaq.io/`).
 - Subscription help and current sync status: `/about`.
-- Subscribe directly to another SoundCloud source, for example `https://podcast.alaq.io/robot-heart/tracks`. The `/add` page is an optional URL helper and progress view. No per-source configuration is required.
+- Subscribe directly to another SoundCloud source, for example `https://podcast.alaq.io/robot-heart/tracks`. No per-source configuration is required.
 - In Apple Podcasts, use **Follow a Show by URL**. The help page also has an Overcast subscription link.
 - New Likes are checked every five minutes. The CDN may retain the previous snapshot for another five minutes, and clients control their own polling/download schedules.
 - Episodes use the Like date, stable IDs, fixed enclosure URLs, MP3 sizes, artwork, and durations. Existing episodes retain their seeded dates and enclosure identities during migration.
@@ -24,9 +24,9 @@ The first RSS request registers the source, saves its first page of track metada
 
 Initial preparation targets an eight-second soft budget, with seven seconds for source work, short network timeouts and at most ten audio attempts to find five successes. It returns fewer episodes if the source has fewer playable tracks or the budget runs short; subsequent batches retain their IDs and dates. Exact source totals are not needed: saved metadata and pagination cursors let preparation resume. Only if no real episode can be prepared does the request return retryable `503` with `Retry-After: 5`; repeated cold attempts are coalesced for a minute. Network/storage latency can extend the soft budget. Once a snapshot exists, reads never wait for SoundCloud extraction.
 
-Optionally, open `https://podcast.alaq.io/add` to paste a URL (including `on.soundcloud.com` share links) and see progress or subscription controls. Visiting this page is not required before subscribing directly.
+For an `on.soundcloud.com` share link, open it on SoundCloud first and use the full source URL it resolves to.
 
-Only the main ACSv3 feed uses the five-minute scheduler. Every other feed refreshes on demand: a request to its RSS URL (including HEAD or conditional 304 requests), registration page, or progress API can enqueue work if its last successful check is at least 30 minutes old. Incomplete preparation can resume sooner. No more requests means no more refreshes after the already-started, bounded preparation burst finishes; metadata, saved RSS and URLs remain available. An unsubscribe is not observable directly: an app or crawler that continues polling still counts as demand.
+Only the main ACSv3 feed uses the five-minute scheduler. Every other feed refreshes on demand: a request to its RSS URL (including HEAD or conditional 304 requests) or progress API can enqueue work if its last successful check is at least 30 minutes old. Incomplete preparation can resume sooner. No more requests means no more refreshes after the already-started, bounded preparation burst finishes; metadata, saved RSS and URLs remain available. An unsubscribe is not observable directly: an app or crawler that continues polling still counts as demand.
 
 The first request after an idle period gets the saved feed while a one-off QStash job checks SoundCloud. A subsequent client poll sees any updates. The CDN can serve requests for five minutes before the next origin request; this delays demand detection slightly but does not generate periodic work itself. Enqueueing uses short connection/read timeouts, and a queue outage does not prevent a saved RSS response. A one-minute per-source cooldown prevents failed requests or rapid progress polling from repeatedly enqueueing work.
 
@@ -38,7 +38,6 @@ Each request-triggered burst can queue up to 25 short background batches, stoppi
 Main feed: QStash (every 5 min) → SoundCloud sync → atomic RSS publication
 Other feeds: client request → saved RSS + one-off QStash work when due
 New RSS URL → Redis registration + metadata → first five episodes → background batches
-Optional add / progress page → Redis registration + bounded preparation batches
 Podcast app → Vercel CDN → Redis manifest + saved RSS
 Podcast app → /track/artist/set → temporary 302 → SoundCloud MP3 CDN
 ```

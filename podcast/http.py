@@ -82,15 +82,11 @@ class Handler(BaseHTTPRequestHandler):
                 body = (Path(__file__).resolve().parent.parent / "api" / "art.png").read_bytes()
                 self.reply(200, body, "image/png", {"Cache-Control": "public, max-age=86400"})
                 return
-            if path in ("/favicon.ico", "/api/sync"):
+            if path in ("/favicon.ico", "/add", "/add/", "/api/sync"):
                 self.reply(405 if path == "/api/sync" else 404, headers={"Cache-Control": "no-store"})
                 return
             store = self.store_factory(config)
             base = config.base_for_host(self.headers.get("Host", ""))
-            if path == "/add":
-                body = (Path(__file__).resolve().parent / "add.html").read_bytes()
-                self.reply(200, body, "text/html; charset=utf-8", {"Cache-Control": "no-store"})
-                return
             if path == "/api/feeds":
                 feed = source_feed(parse_qs(urlsplit(self.path).query).get("source", [""])[0])
                 self.feed_progress(config, store, base, feed)
@@ -116,8 +112,7 @@ class Handler(BaseHTTPRequestHandler):
             elif registered:
                 request_work(config, store, feed)
             if not manifest:
-                link = base + "/add?source=" + quote(feed, safe="")
-                self.reply(503, b"No playable episodes are ready yet. Preparation will retry; please request this feed again shortly.", headers={"Retry-After": "5", "Cache-Control": "no-store", "Link": '<' + link + '>; rel="help"'})
+                self.reply(503, b"No playable episodes are ready yet. Preparation will retry; please request this feed again shortly.", headers={"Retry-After": "5", "Cache-Control": "no-store"})
                 return
             variant = manifest["variants"].get(base) or manifest["variants"][config.bases[0]]
             headers = {"Cache-Control": "public, max-age=0, must-revalidate", "Vercel-CDN-Cache-Control": "public, s-maxage=300, stale-while-revalidate=60",
@@ -191,7 +186,7 @@ class Handler(BaseHTTPRequestHandler):
 <title>ACSv3 · SoundCloud sets</title><style>body{{font:18px/1.6 system-ui;margin:10vh auto;padding:24px;max-width:640px;color:#1d252b;background:#f6f3ee}}img{{width:140px;border-radius:18px}}a{{color:#a8420b}}code{{word-break:break-all}}.muted{{color:#59626a}}</style>
 <img src="/art.png" alt="ACSv3 artwork"><h1>ACSv3</h1><p>DJ sets liked on SoundCloud, ready in your podcast app.</p>
 <p><a href="{html.escape(overcast)}">Subscribe in Overcast</a> · <a href="{html.escape(feed_url)}">RSS feed</a></p>
-<p><a href="/add">Turn another SoundCloud page into a podcast</a></p>
+<p>For another public SoundCloud source, replace <code>soundcloud.com</code> with <code>{html.escape(urlsplit(base).netloc)}</code> in its URL and add it directly in your podcast app.</p>
 <p>In Apple Podcasts, choose Follow a Show by URL and paste:</p><p><code>{html.escape(feed_url)}</code></p>
 <p class="muted">{count} episodes available. Last successful sync: {when}.</p>
 <p class="muted">{'A sync is being retried; the last saved feed remains available.' if public.get('error') else 'New Likes are checked every five minutes; your podcast app may refresh later.'}</p></html>'''
