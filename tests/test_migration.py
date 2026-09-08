@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import xml.etree.ElementTree as ET
 from dataclasses import replace
@@ -6,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from podcast.cli import schedule
+from podcast.cli import schedule, schedule_id
 from podcast.feed import enclosure_url, render
 from podcast.migrate import publish, seed
 from podcast.store import StorageError
@@ -117,3 +118,14 @@ def test_schedule_requires_prepared_feed_and_uses_stable_id(config, store, sourc
     assert a == b and calls[0] == calls[1]
     assert calls[0]["retries"] == 2 and calls[0]["timeout"] == "60s"
     assert "headers" not in calls[0]  # QStash signature, no forwarded bearer credential
+
+
+def test_shared_schedule_reuses_existing_id_without_requiring_a_new_bootstrap(config, store, feed):
+    config = replace(config, qstash_token="token", signing_key="current", next_signing_key="next")
+    calls = []
+    api = SimpleNamespace(create=lambda **kw: calls.append(kw), get=lambda ident: SimpleNamespace(destination=config.sync_url, cron="*/5 * * * *", paused=False))
+    result = schedule(config, store, feed, "create", SimpleNamespace(schedule=api), shared=True)
+    assert result["schedule_id"] == schedule_id(config, feed)
+    assert calls[0]["schedule_id"] == result["schedule_id"]
+    assert json.loads(calls[0]["body"]) == {"tick": True}
+    assert store.manifest(feed) is None  # Scheduling cannot publish an unmigrated feed.

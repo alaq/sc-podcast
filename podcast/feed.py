@@ -36,7 +36,7 @@ def enclosure_url(base, track):
     return base + "/track/" + quote(track["enclosure_path"], safe="/")
 
 
-def render(feed, entries, base, title=None):
+def render(feed, entries, base, title=None, image=None):
     root = ET.Element("rss", version="2.0")
     channel = ET.SubElement(root, "channel")
     def tag(parent, name, value, **attrs):
@@ -49,7 +49,7 @@ def render(feed, entries, base, title=None):
     tag(channel, "description", f"Podcast feed for {name}")
     tag(channel, "language", "en-us")
     tag(channel, f"{{{ITUNES}}}author", name)
-    ET.SubElement(channel, f"{{{ITUNES}}}image", href=base + "/art.png")
+    ET.SubElement(channel, f"{{{ITUNES}}}image", href=episode_artwork(image) if image and feed != DEFAULT_FEED else base + "/art.png")
     ET.SubElement(channel, f"{{{ATOM}}}link", href=base + ("/" if feed == DEFAULT_FEED else "/" + feed), rel="self", type="application/rss+xml")
     for track in entries:
         if not track.get("length") or not track.get("published_at"):

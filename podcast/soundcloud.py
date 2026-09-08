@@ -127,11 +127,15 @@ class SoundCloud:
         if cursor:
             data = self.api(clean_cursor(cursor))
             title = "SoundCloud"
+            image = None
         else:
             parts = feed.split("/")
             user_feed = len(parts) == 2 and parts[1] in ("likes", "reposts", "tracks")
             resolved = self.api("https://api-v2.soundcloud.com/resolve", query={"url": "https://soundcloud.com/" + (parts[0] if user_feed else feed)})
             title = resolved.get("username") or resolved.get("title") or parts[0]
+            image = episode_artwork(resolved.get("artwork_url") or resolved.get("avatar_url") or resolved.get("user", {}).get("avatar_url") or "")
+            if user_feed:
+                title += {"likes": " · Likes", "tracks": " · Uploads", "reposts": " · Reposts"}[parts[1]]
             if user_feed:
                 resource = f"users/{resolved['id']}/{parts[1]}"
                 if parts[1] == "reposts":
@@ -163,7 +167,7 @@ class SoundCloud:
                 entries.append(entry)
             else:
                 skipped += 1
-        return {"entries": entries, "next": clean_cursor(data.get("next_href")), "title": title, "skipped": skipped}
+        return {"entries": entries, "next": clean_cursor(data.get("next_href")), "title": title, "image": image, "skipped": skipped}
 
     def resolve_audio(self, track):
         progressive = track.get("progressive_url")

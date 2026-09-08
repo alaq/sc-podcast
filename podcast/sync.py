@@ -32,7 +32,7 @@ def build_snapshot(store, config, feed, state, previous, now):
     variants = {}
     bodies = {}
     for base in config.bases:
-        body = render(feed, entries, base, state.get("title"))
+        body = render(feed, entries, base, state.get("title"), state.get("image"))
         checksum = hashlib.sha256(body).hexdigest()
         key = store.key(feed, "body:" + checksum)
         variants[base] = {"key": key, "etag": f'"{checksum}"', "length": len(body)}
@@ -51,7 +51,7 @@ class Synchronizer:
         self.config, self.store, self.source = config, store, source
         self.clock, self.monotonic = clock, monotonic
 
-    def run(self, feed, publish=True):
+    def run(self, feed, publish=True, activate=False):
         token = self.store.acquire(feed)
         if not token:
             return {"state": "already_running", "feed": feed}
@@ -61,7 +61,7 @@ class Synchronizer:
         try:
             status = self.store.status(feed)
             head = self.source.listing(feed)
-            signature = digest(head["entries"])
+            signature = digest({"entries": head["entries"], "title": head["title"], "image": head.get("image")})
             retry_due = status.get("retry_at", 0) and status["retry_at"] <= now
             if signature == status.get("head_signature") and not retry_due and not status.get("has_more"):
                 status.update(last_checked_at=now, last_success_at=now, error=None)
@@ -70,7 +70,7 @@ class Synchronizer:
 
             state = self.store.state(feed)
             if not state:
-                state = {"tracks": {}, "bootstrap_at": now, "rollout_ready": False, "title": head["title"],
+                state = {"tracks": {}, "bootstrap_at": now, "rollout_ready": bool(activate), "title": head["title"],
                          "pending_pages": []}
             if not state.get("backfill_initialized"):
                 state.update(backfill_cursor=head["next"], backfill_initialized=True)
@@ -113,8 +113,9 @@ class Synchronizer:
                     state["tracks"][entry["id"]] = merged
                     changed.append(merged)
             state["title"] = head["title"]
+            state["image"] = head.get("image")
             state["skipped_source_items"] = head.get("skipped", 0)
-            status.update(head_signature=signature, last_checked_at=now, error=None)
+            status.update(head_signature=signature, last_checked_at=now, error=None, title=head["title"], image=head.get("image"))
 
             # Save discovery before any slow preparation. A timeout cannot lose Likes.
             status.update(retry_at=now, has_more=True)
@@ -165,12 +166,11 @@ class Synchronizer:
             return {"state": "published" if manifest else "prepared", "feed": feed, "discovered": len(state["tracks"]),
                     "ready": len(ready), "published": status.get("published_count", 0), "unavailable": status["unavailable_count"]}
         except (SourceError, StorageError):
-            if status:
-                try:
-                    status.update(last_checked_at=now, error="sync_failed")
-                    self.store.commit(feed, token, status)
-                except StorageError:
-                    pass
+            try:
+                status.update(last_checked_at=now, error="sync_failed")
+                self.store.commit(feed, token, status)
+            except StorageError:
+                pass
             raise
         finally:
             try:

@@ -83,13 +83,46 @@ def test_audio_get_head_are_direct_uncached_redirects(server):
 
 def test_unknown_sources_and_public_status(server):
     request, _ = server
-    assert request(path="/unknown/likes")[0] == 404
+    assert request(path="/unknown/likes")[0] == 503  # starts automatic preparation
     assert request(path="/api/sync")[0] == 405
     status, _, body = request(path="/status")
     assert status == 200 and json.loads(body)["published_count"] == 8
     page = request(path="/about")[2].decode()
     assert "overcast://" in page and "Follow a Show by URL" in page
     assert request(path="/art.png")[0] == 200
+
+
+def test_new_source_prepares_incrementally_and_reuses_subscription(server, source):
+    request, config = server
+    before = request()[2]
+    calls = len(source.list_calls), len(source.audio_calls)
+    status, _, body = request("POST", "/api/feeds", json.dumps({"url": "https://soundcloud.com/robot-heart?utm_source=share"}))
+    data = json.loads(body)
+    assert status == 200 and data["feed"] == "robot-heart/tracks" and data["count"] == 0
+    assert (len(source.list_calls), len(source.audio_calls)) == calls
+    assert request(path="/robot-heart/tracks")[0] == 503
+    auth = {"Authorization": "Bearer " + config.sync_secret}
+    assert request("POST", "/api/sync", '{"feed":"robot-heart/tracks"}', auth)[0] == 200
+    status, _, first = request(path="/robot-heart/tracks")
+    assert status == 200
+    first_ids = {x.findtext("guid") for x in ET.fromstring(first).findall("./channel/item")}
+    assert len(first_ids) == 8
+    assert request("POST", "/api/sync", '{"feed":"robot-heart/tracks"}', auth)[0] == 200
+    second = request(path="/robot-heart/tracks")[2]
+    second_ids = {x.findtext("guid") for x in ET.fromstring(second).findall("./channel/item")}
+    assert len(second_ids) == 16 and first_ids <= second_ids
+    repeat = json.loads(request("POST", "/api/feeds", '{"url":"robot-heart/tracks"}')[2])
+    assert repeat["count"] == 16 and repeat["feed_url"] == data["feed_url"]
+    assert request()[2] == before
+    assert json.loads(request(path="/api/feeds?source=robot-heart/tracks")[2])["state"] == "ready"
+    assert b"Create podcast feed" in request(path="/add")[2]
+
+
+def test_registration_rejects_external_urls_and_cross_origin_requests(server):
+    request, config = server
+    assert request("POST", "/api/feeds", '{"url":"https://example.com/collect"}')[0] == 400
+    assert request("POST", "/api/feeds", '{"url":"robot-heart"}', {"Origin": "https://example.com"})[0] == 403
+    assert request(path="/api/feeds?source=not-added/likes")[0] == 404
 
 
 def signature(config, raw, key=None, **claims):
