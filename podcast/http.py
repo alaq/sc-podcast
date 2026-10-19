@@ -16,7 +16,6 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 import requests
 from qstash import Receiver
 
-from podcast import hls
 from podcast.config import Config, DEFAULT_FEED, normalize_feed
 from podcast.soundcloud import SoundCloud, SourceError
 from podcast.store import Store, StorageError
@@ -154,7 +153,8 @@ class Handler(BaseHTTPRequestHandler):
             audio = store.audio(track_path)
         except StorageError:
             audio = None
-        if not audio or audio.get("expires_at", 0) <= now + 30:
+        if (not audio or not audio.get("url") or audio.get("delivery") == "hls-m4a"
+                or audio.get("expires_at", 0) <= now + 30):
             try:
                 track = store.track(track_path)
             except StorageError:
@@ -170,48 +170,9 @@ class Handler(BaseHTTPRequestHandler):
                 store.cache_audio(track_path, audio, ttl)
             except StorageError:
                 pass
-        if audio.get("delivery") != "hls-m4a":
-            self.reply(302, headers={"Location": audio["url"], "Cache-Control": "no-store"})
-            return
-        length = audio["length"]
-        headers = {"Cache-Control": "no-store", "Accept-Ranges": "bytes", "ETag": audio["etag"]}
-        value = self.headers.get("Range") if self.command == "GET" else None
-        if self.headers.get("If-Range") not in (None, audio["etag"]):
-            value = None
-        try:
-            start, end, partial = hls.byte_range(value, length)
-        except ValueError:
-            self.reply(416, headers={**headers, "Content-Range": f"bytes */{length}"})
-            return
-        headers["Content-Length"] = end - start + 1
-        if partial:
-            headers["Content-Range"] = f"bytes {start}-{end}/{length}"
-        if self.command == "HEAD":
-            self.reply(206 if partial else 200, content_type="audio/mp4", headers=headers)
-            return
-        stream = hls.chunks(audio, start, end)
-        try:
-            first = next(stream)  # Fail before writing headers where possible.
-        except hls.HLSError as exc:
-            raise SourceError("Audio source unavailable") from exc
-        try:
-            self.send_response(206 if partial else 200)
-            self.send_header("Content-Type", "audio/mp4")
-            self.send_header("X-Content-Type-Options", "nosniff")
-            for key, val in headers.items():
-                self.send_header(key, str(val))
-            self.end_headers()
-            self.wfile.write(first)
-            self.wfile.flush()
-            for chunk in stream:
-                self.wfile.write(chunk)
-                self.wfile.flush()
-        except (hls.HLSError, BrokenPipeError, ConnectionResetError, TimeoutError):
-            # A truncated Content-Length response can be retried by the client.
-            # Never append an HTTP error document to an already-started audio file.
-            self.close_connection = True
-        finally:
-            stream.close()
+        # Audio bytes belong to SoundCloud. GET, HEAD and range requests all
+        # receive an empty redirect; never proxy or assemble media here.
+        self.reply(302, headers={"Location": audio["url"], "Cache-Control": "no-store"})
 
     def about(self, config, store, base, as_json):
         status = store.status(DEFAULT_FEED) if DEFAULT_FEED in config.feeds else store.status(config.feeds[0])

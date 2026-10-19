@@ -16,7 +16,9 @@ from yt_dlp.extractor.soundcloud import SoundcloudUserIE
 from yt_dlp.networking import Request
 
 from podcast.artwork import episode_artwork
-from podcast import hls
+
+
+HLS_TYPES = {"application/vnd.apple.mpegurl", "application/x-mpegurl", "audio/mpegurl"}
 
 
 class SourceError(RuntimeError):
@@ -228,21 +230,15 @@ class SoundCloud:
             track.update({k: fresh[k] for k in ("progressive_url", "hls_url", "duration")})
             endpoint = replacement
             data = self.api(endpoint)
-        if not track.get("progressive_url"):
-            try:
-                audio = hls.prepare(data.get("url", ""), track.get("duration"), getattr(self, "deadline", None))
-            except hls.HLSError as exc:
-                if getattr(self, "deadline", None) is not None and time.monotonic() >= self.deadline:
-                    raise SourceDeadline("Audio preparation budget exhausted") from exc
-                raise SourceError("Full-length AAC preparation failed") from exc
-            expiry = signed_url_expiry(audio["segments"][0]["url"])
-            if expiry is not None:
-                audio["expires_at"] = min(audio["expires_at"], expiry)
-            return audio
         url = data.get("url", "")
         parsed = urlsplit(url)
-        if parsed.scheme != "https" or not (parsed.hostname or "").endswith(".sndcdn.com"):
+        if (parsed.scheme != "https" or parsed.username or parsed.password
+                or parsed.port not in (None, 443)
+                or not ((parsed.hostname or "").endswith(".sndcdn.com")
+                        or parsed.hostname == "playback.media-streaming.soundcloud.cloud")):
             raise SourceError("Unexpected audio host")
+        if not track.get("progressive_url"):
+            return self.resolve_playlist(url)
         try:
             timeout = (3, 5)
             if getattr(self, "deadline", None) is not None:
@@ -260,3 +256,32 @@ class SoundCloud:
         except (requests.RequestException, ValueError) as exc:
             raise SourceError("Audio availability check failed") from exc
         return {"url": url, "length": size, "type": "audio/mpeg", "expires_at": signed_url_expiry(url) or 0, "resolved_at": int(time.time())}
+
+    def resolve_playlist(self, url):
+        """Read bounded playlist metadata only; clients fetch all audio themselves."""
+        deadline = min(getattr(self, "deadline", None) or float("inf"), time.monotonic() + 8)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise SourceDeadline("Initial preparation budget exhausted")
+        try:
+            with self.session.get(url, stream=True, allow_redirects=False,
+                                  timeout=(min(2, remaining / 2), min(3, remaining / 2))) as response:
+                response.raise_for_status()
+                mime = response.headers.get("Content-Type", "").split(";")[0].lower()
+                if response.status_code != 200 or mime not in HLS_TYPES:
+                    raise SourceError("Audio link is not an HLS playlist")
+                body = bytearray()
+                for chunk in response.iter_content(65536):
+                    if time.monotonic() >= deadline:
+                        raise SourceDeadline("Playlist metadata budget exhausted")
+                    body.extend(chunk)
+                    if len(body) > 8 * 1024 * 1024:
+                        raise SourceError("Playlist metadata exceeds limit")
+                if not body.startswith(b"#EXTM3U") or b"#EXT-X-ENDLIST" not in body:
+                    raise SourceError("Audio link is not a complete VOD playlist")
+        except requests.RequestException as exc:
+            raise SourceError("Playlist availability check failed") from exc
+        now = int(time.time())
+        # This is the playlist's actual MIME/length, never a synthetic M4A file.
+        return {"url": url, "delivery": "redirect", "length": len(body), "type": mime,
+                "expires_at": signed_url_expiry(url) or now + 120, "resolved_at": now}
