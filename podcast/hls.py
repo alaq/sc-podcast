@@ -10,6 +10,8 @@ import re
 import struct
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from threading import local, Lock
 from collections import deque
 from urllib.parse import urljoin, urlsplit
 
@@ -20,6 +22,24 @@ MAX_FRAGMENT = 4 * 1024 * 1024
 MAX_FILE = 2 * 1024 * 1024 * 1024
 CONCURRENCY = 12
 HEADER_CONCURRENCY = 24
+_http = local()
+
+
+@contextmanager
+def workers(count):
+    """Reuse TLS connections within each worker, then release every session."""
+    sessions, lock = [], Lock()
+    def initialize():
+        session = requests.Session()
+        _http.session = session
+        with lock:
+            sessions.append(session)
+    try:
+        with ThreadPoolExecutor(max_workers=count, initializer=initialize) as pool:
+            yield pool
+    finally:
+        for session in sessions:
+            session.close()
 
 
 class HLSError(RuntimeError):
@@ -58,7 +78,7 @@ def _fetch_once(url, start=None, end=None, limit=MAX_FRAGMENT, deadline=None):
     if start is not None:
         headers['Range'] = f'bytes={start}-{end}'
     try:
-        with requests.get(url, headers=headers, timeout=(min(2, timeout), timeout),
+        with getattr(_http, "session", requests).get(url, headers=headers, timeout=(min(2, timeout), timeout),
                           stream=True, allow_redirects=False) as response:
             if response.status_code in (429, 500, 502, 503, 504):
                 raise TransientHLSError('Temporary audio source failure')
@@ -228,7 +248,7 @@ def prepare(url, expected_duration, deadline=None):
     if expected_duration and abs(duration - expected_duration) > max(2, expected_duration * .001):
         raise HLSError('Audio is not full length')
     init, _ = fetch(init_url, limit=65536, deadline=deadline)
-    with ThreadPoolExecutor(max_workers=HEADER_CONCURRENCY) as pool:
+    with workers(HEADER_CONCURRENCY) as pool:
         segments = list(pool.map(lambda u: segment_header(u, deadline), urls))
     ident, scale, ticks = segments[0]['id'], segments[0]['scale'], 0
     for segment in segments:
@@ -286,7 +306,7 @@ def chunks(audio, start, end):
             break
     # Bounded window rather than Executor.map, which would buffer the whole set
     # behind a slow listener. Each future contains at most one small fragment.
-    with ThreadPoolExecutor(max_workers=CONCURRENCY) as pool:
+    with workers(CONCURRENCY) as pool:
         pending = deque()
         it = iter(work)
         def submit(item):
