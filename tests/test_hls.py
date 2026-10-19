@@ -123,3 +123,26 @@ def test_transient_source_fetch_retries_once_but_rejects_bad_ranges(monkeypatch)
     def fail(*args): raise hls.TransientHLSError('Still unavailable')
     monkeypatch.setattr(hls, '_fetch_once', fail)
     with pytest.raises(hls.TransientHLSError): hls.fetch(HOST + 'file')
+
+
+def test_worker_reuses_its_connection_session_and_closes_it(monkeypatch):
+    sessions = []
+    class Response:
+        status_code = 206
+        headers = {'Content-Range': 'bytes 0-0/2'}
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def iter_content(self, n): return iter([b'x'])
+    class Session:
+        def __init__(self):
+            self.calls, self.closed = 0, False
+            sessions.append(self)
+        def get(self, *args, **kwargs):
+            assert not self.closed
+            self.calls += 1
+            return Response()
+        def close(self): self.closed = True
+    monkeypatch.setattr(hls.requests, 'Session', Session)
+    with hls.workers(1) as pool:
+        assert list(pool.map(lambda _: hls.fetch(HOST + 'audio', 0, 0), range(3))) == [(b'x', 2)] * 3
+    assert len(sessions) == 1 and sessions[0].calls == 3 and sessions[0].closed
