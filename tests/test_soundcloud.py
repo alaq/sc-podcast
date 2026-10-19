@@ -117,7 +117,7 @@ def test_invalid_feed_paths(path):
     with pytest.raises(ValueError): normalize_feed(path)
 
 
-def test_full_aac_hls_is_preferred_over_preview_and_prepared(monkeypatch):
+def test_full_aac_hls_is_preferred_over_preview_and_redirected(monkeypatch):
     raw = raw_track()
     raw["media"]["transcodings"] = [
         {"url": "https://api-v2.soundcloud.com/preview/42", "snipped": True, "quality": "sq",
@@ -129,13 +129,11 @@ def test_full_aac_hls_is_preferred_over_preview_and_prepared(monkeypatch):
     source = object.__new__(SoundCloud)
     calls = []
     source.api = lambda url, **kw: calls.append(url) or {"url": "https://cf-media.sndcdn.com/index.m3u8"}
-    def prepare(url, duration, deadline):
-        assert duration == 7200 and url.endswith("index.m3u8")
-        return {"type": "audio/mp4", "length": 123, "expires_at": 2000000000,
-                "segments": [{"url": "https://cf-media.sndcdn.com/1?Expires=1900000000"}]}
-    monkeypatch.setattr("podcast.hls.prepare", prepare)
+    source.session = playlist_session()
     audio = source.resolve_audio(track)
-    assert audio["type"] == "audio/mp4" and audio["expires_at"] == 1900000000
+    assert audio["type"] == "application/vnd.apple.mpegurl"
+    assert audio["delivery"] == "redirect" and audio["url"].endswith("index.m3u8")
+    assert audio["length"] == len(PLAYLIST)
     assert calls == [track["hls_url"]]
 
 
@@ -149,7 +147,39 @@ def test_retained_mp3_endpoint_can_migrate_to_aac(monkeypatch):
         if url.endswith("/resolve"): return raw
         return {"url": "https://cf-media.sndcdn.com/index.m3u8"}
     source.api = api
-    monkeypatch.setattr("podcast.hls.prepare", lambda *a: {"type": "audio/mp4", "expires_at": 2000000000, "segments": [{"url": "https://cf-media.sndcdn.com/1"}]})
+    source.session = playlist_session()
     track = {"webpage_url": raw["permalink_url"], "progressive_url": "https://api-v2.soundcloud.com/old"}
-    assert source.resolve_audio(track)["type"] == "audio/mp4"
+    assert source.resolve_audio(track)["type"] == "application/vnd.apple.mpegurl"
     assert not track["progressive_url"] and track["hls_url"].endswith("/aac/42")
+
+
+PLAYLIST = (b'#EXTM3U\n#EXT-X-MAP:URI="https://cf-media.sndcdn.com/init"\n'
+            b'#EXTINF:10,\nhttps://cf-media.sndcdn.com/audio.m4s\n#EXT-X-ENDLIST\n')
+
+
+def playlist_session(body=PLAYLIST, mime="application/vnd.apple.mpegurl"):
+    class Response:
+        status_code = 200
+        headers = {"Content-Type": mime}
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def raise_for_status(self): pass
+        def iter_content(self, size): yield body
+    def get(url, **kwargs):
+        assert url.endswith("index.m3u8")  # No init or audio segment requests.
+        assert kwargs["stream"] and not kwargs["allow_redirects"]
+        return Response()
+    return SimpleNamespace(get=get)
+
+
+@pytest.mark.parametrize("body,mime", [
+    (b"not a playlist", "application/vnd.apple.mpegurl"),
+    (PLAYLIST.replace(b"#EXT-X-ENDLIST", b""), "application/vnd.apple.mpegurl"),
+    (PLAYLIST, "audio/mp4"),
+    (PLAYLIST + b"x" * (8 * 1024 * 1024), "application/vnd.apple.mpegurl"),
+])
+def test_playlist_checks_are_bounded_and_never_accept_media_as_playlist(body, mime):
+    source = object.__new__(SoundCloud)
+    source.session = playlist_session(body, mime)
+    with pytest.raises(SourceError):
+        source.resolve_playlist("https://cf-media.sndcdn.com/index.m3u8")

@@ -258,25 +258,31 @@ def test_qstash_key_rotation_body_url_and_expiry(server, source):
     assert request("POST", "/api/sync?wrong=1", raw, {"Upstash-Signature": signature(config, raw)})[0] == 404
 
 
-def test_m4a_head_ranges_if_range_and_cache_roundtrip(server, store, monkeypatch):
-    request, _ = server
-    body = b"header--fragment--tail"
-    info = {"delivery": "hls-m4a", "length": len(body), "type": "audio/mp4", "etag": '\"aac-test\"',
-            "expires_at": int(time.time()) + 300}
-    store.cache_audio("dj/aac", info, 120)
-    assert store.audio("dj/aac") == info
+@pytest.mark.parametrize("method,headers", [
+    ("GET", {}), ("HEAD", {}), ("GET", {"Range": "bytes=0-127"}),
+    ("GET", {"Range": "bytes=-128"}), ("GET", {"Range": "bytes=999999-"}),
+])
+def test_hls_requests_redirect_without_media_bytes_even_with_old_proxy_cache(server, store, source, method, headers):
+    from podcast.store import compact, pack
+    request, config = server
+    path = "dj/aac"
+    old = {"delivery": "hls-m4a", "length": 999999, "type": "audio/mp4",
+           "segments": [{"url": "https://cf-media.sndcdn.com/segment"}],
+           "expires_at": int(time.time()) + 300}
+    # Reproduce compressed cache entries already written by the proxy deployment.
+    key = f"{config.namespace}:audio:{hashlib.sha256(path.encode()).hexdigest()}"
+    store.command("SET", key, compact({"packed": pack(old)}), "EX", 120)
     calls = []
-    def chunks(audio, start, end):
-        calls.append((start, end))
-        yield body[start:end + 1]
-    monkeypatch.setattr("podcast.hls.chunks", chunks)
-    status, headers, data = request("HEAD", "/track/dj/aac")
-    assert status == 200 and not data and not calls
-    assert headers["Content-Type"] == "audio/mp4" and int(headers["Content-Length"]) == len(body)
-    assert request(path="/track/dj/aac")[2] == body
-    status, headers, data = request(path="/track/dj/aac", headers={"Range": "bytes=6-11"})
-    assert status == 206 and data == body[6:12] and headers["Content-Range"] == f"bytes 6-11/{len(body)}"
-    assert request(path="/track/dj/aac", headers={"Range": "bytes=-4"})[2] == b"tail"
-    assert request(path="/track/dj/aac", headers={"Range": "bytes=999-"})[0] == 416
-    assert request(path="/track/dj/aac", headers={"Range": "bytes=0-0", "If-Range": info["etag"]})[2] == body[:1]
-    assert request(path="/track/dj/aac", headers={"Range": "bytes=0-0", "If-Range": '\"old\"'})[2] == body
+    url = "https://playback.media-streaming.soundcloud.cloud/test.m3u8"
+    def resolve(track):
+        calls.append(track)
+        return {"url": url, "delivery": "redirect", "length": 100,
+                "type": "application/vnd.apple.mpegurl", "expires_at": int(time.time()) + 300}
+    source.resolve_audio = resolve
+    for _ in range(2):
+        status, response_headers, data = request(method, "/track/" + path, headers=headers)
+        assert status == 302 and response_headers["Location"] == url
+        assert response_headers["Content-Length"] == "0" and data == b""
+        assert response_headers["Cache-Control"] == "no-store"
+    assert len(calls) == 1
+    assert store.audio(path)["delivery"] == "redirect"

@@ -184,7 +184,7 @@ def test_migration_repairs_sized_old_episodes_preserving_identity(config, store,
     publish(config, store, feed, no_consumer=True, minimum=2)
     before = copy.deepcopy(store.state(feed))
     source.pages[None]["entries"] = [track(i, progressive_url="", hls_url="https://api-v2.soundcloud.com/aac/" + str(i)) for i in (1, 2, 3)]
-    source.resolve_audio = lambda entry: {"type": "audio/mp4", "length": 9000 + int(entry["id"])}
+    source.resolve_audio = lambda entry: {"type": "application/vnd.apple.mpegurl", "length": 9000 + int(entry["id"])}
     first = run(config, store, source, feed)
     assert first["published"] == 2 and store.status(feed)["repair_pending_count"] == 1
     assert run(config, store, source, feed)["state"] == "published"
@@ -194,7 +194,7 @@ def test_migration_repairs_sized_old_episodes_preserving_identity(config, store,
     assert store.status(feed)["repair_pending_count"] == 0
     body = store.body(store.manifest(feed)["variants"][config.bases[0]]["key"])
     items = ET.fromstring(body).findall("./channel/item")
-    assert all(x.find("enclosure").get("type") == "audio/mp4" for x in items)
+    assert all(x.find("enclosure").get("type") == "application/vnd.apple.mpegurl" for x in items)
     assert {x.findtext("guid") for x in items} == {"soundcloud:track:2", "soundcloud:track:3"}
     assert run(config, store, source, feed)["state"] == "unchanged"
 
@@ -205,7 +205,7 @@ def test_aac_cold_feed_is_prepared_and_old_unavailable_backoff_is_reset(config, 
     run(config, store, source, feed)
     source.bad.clear()
     source.pages[None]["entries"] = [track(1, progressive_url="", hls_url="https://api-v2.soundcloud.com/aac/1")]
-    source.resolve_audio = lambda t: {"type": "audio/mp4", "length": 100}
+    source.resolve_audio = lambda t: {"type": "application/vnd.apple.mpegurl", "length": 100}
     assert run(config, store, source, feed)["ready"] == 1
     assert Synchronizer(config, store, source).run("fresh/tracks", initial=True, activate=True)["published"] == 1
 
@@ -238,5 +238,27 @@ def test_repair_revalidates_old_mp3_outside_head_without_new_discovery(config, s
     calls = len(source.audio_calls)
     run(config, store, source, feed)
     assert source.audio_calls[calls:] == ['1']
-    assert store.state(feed)['tracks']['1']['audio_format_version'] == 2
+    assert store.state(feed)['tracks']['1']['audio_format_version'] == 3
     assert run(config, store, source, feed)['state'] == 'unchanged'
+
+
+def test_proxy_metadata_is_refreshed_without_changing_any_episode_identity(config, store, feed):
+    source = Source([track(1), track(2)])
+    run(config, store, source, feed)
+    publish(config, store, feed, no_consumer=True, minimum=2)
+    before = copy.deepcopy(store.state(feed))
+    state = copy.deepcopy(before)
+    for entry in state['tracks'].values():
+        entry.update(audio_type='audio/mp4', audio_format_version=2, length=123000000)
+    status = store.status(feed)
+    status['audio_format_version'] = 2
+    token = store.acquire(feed)
+    store.commit(feed, token, status, state=state)
+    store.release(feed, token)
+    source.resolve_audio = lambda entry: {'type': 'application/vnd.apple.mpegurl', 'length': 5000}
+    run(config, store, source, feed)
+    for ident, entry in store.state(feed)['tracks'].items():
+        assert entry['audio_format_version'] == 3 and entry['length'] == 5000
+        for field in ('published_at', 'enclosure_path', 'guid_by_base'):
+            assert entry.get(field) == before['tracks'][ident].get(field)
+    assert store.status(feed)['repair_pending_count'] == 0

@@ -133,7 +133,7 @@ class Store:
 
     def cache_audio(self, track_path, info, ttl):
         if ttl > 0:
-            self.command("SET", f"{self.config.namespace}:audio:{hashlib.sha256(track_path.encode()).hexdigest()}", compact({"packed": pack(info)} if info.get("delivery") == "hls-m4a" else info), "EX", ttl)
+            self.command("SET", f"{self.config.namespace}:audio:{hashlib.sha256(track_path.encode()).hexdigest()}", compact(info), "EX", ttl)
 
     def expire_old_bodies(self, keys):
         for key in keys:
