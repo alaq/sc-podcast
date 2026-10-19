@@ -3,7 +3,6 @@
   "fluid": true,
   "functions": {
     "api/index.py": {
-      "maxDuration": 300,
       "excludeFiles": "{tests/**,scripts/**,.venv/**,.pytest_cache/**}"
     }
   },
