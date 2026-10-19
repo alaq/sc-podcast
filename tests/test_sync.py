@@ -219,3 +219,24 @@ def test_sync_restores_source_deadline_for_subsequent_runs(config, store, feed):
     assert run(config, store, source, feed)['ready'] == 1
     assert source.deadline is None and source.ydl.deadline is None
     assert run(config, store, source, feed)['ready'] == 2
+
+
+def test_repair_revalidates_old_mp3_outside_head_without_new_discovery(config, store, feed):
+    source = Source([track(1), track(2)])
+    run(config, store, source, feed)
+    state = store.state(feed)
+    state['tracks']['1'].pop('audio_format_version')
+    source.pages[None]['entries'] = [track(2)]
+    # Mimic an unchanged head/status left by the earlier MP3-only implementation.
+    status = store.status(feed)
+    from podcast.sync import digest
+    status['head_signature'] = digest({'entries': source.pages[None]['entries'], 'title': 'kado', 'image': None})
+    status.pop('audio_format_version')
+    token = store.acquire(feed)
+    store.commit(feed, token, status, state=state)
+    store.release(feed, token)
+    calls = len(source.audio_calls)
+    run(config, store, source, feed)
+    assert source.audio_calls[calls:] == ['1']
+    assert store.state(feed)['tracks']['1']['audio_format_version'] == 2
+    assert run(config, store, source, feed)['state'] == 'unchanged'

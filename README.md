@@ -43,7 +43,7 @@ Podcast app → /track/artist/set → temporary 302 → SoundCloud MP3 CDN
                               → streamed, seekable M4A → SoundCloud AAC fragments
 ```
 
-Redis holds compressed discovery state, fixed publication dates, permanent track-path mappings, current/previous RSS snapshots, and a two-minute cache of signed audio metadata. MP3 files redirect directly to SoundCloud. AAC playback streams through the existing Vercel Python function with bounded memory; no permanent audio file or additional host is needed. `podcast/hls.py` verifies the complete VOD playlist and fragment headers, fills MP4 durations, constructs a global seek index, and serves byte-exact full/range responses. RSS uses `audio/mp4` and the actual assembled length. Old MP3-only metadata is repaired incrementally without changing IDs, dates, or enclosure paths. Unsupported/encrypted layouts fail closed. The existing `KV_REST_API_*` variables work; the service is now Upstash Redis following Vercel KV's migration.
+Redis holds compressed discovery state, fixed publication dates, permanent track-path mappings, current/previous RSS snapshots, and a two-minute cache of signed audio metadata. MP3 files redirect directly to SoundCloud. AAC playback streams through the existing Vercel Python function with bounded memory; [Fluid compute](https://vercel.com/docs/fluid-compute) uses the platform duration default on the existing Hobby plan; no permanent audio file or additional host is needed. `podcast/hls.py` verifies the complete VOD playlist and fragment headers, fills MP4 durations, constructs a global seek index, and serves byte-exact full/range responses. RSS uses `audio/mp4` and the actual assembled length. Old MP3-only metadata is repaired incrementally without changing IDs, dates, or enclosure paths. Unsupported/encrypted layouts fail closed. The existing `KV_REST_API_*` variables work; the service is now Upstash Redis following Vercel KV's migration.
 
 Feed responses support `HEAD`, gzip, ETags and `Last-Modified`. Unchanged conditional requests avoid reading the large RSS body; secondary feeds also read their small status record to decide whether to enqueue work. Snapshot publication is atomic and guarded by an expiring lock with an ownership check. Failed discovery/preparation leaves the previous feed available. A Redis outage can still affect an uncached origin read; the CDN is a cache, not an independent durable replica.
 
@@ -73,7 +73,7 @@ Fill `.env` locally; it is gitignored. Configure the same variables in Vercel:
 | `QSTASH_TOKEN` | Schedule management and automatic background preparation |
 | `QSTASH_URL` | Optional regional QStash API origin for enqueueing and the CLI, as shown in your console |
 | `SYNC_URL` | Exact public `/api/sync` URL used as the QStash JWT audience |
-| `MAX_AUDIO_PREPARATIONS`, `SYNC_BUDGET_SECONDS` | Default eight preparations and a 40-second soft work budget, within Vercel's 60-second function limit |
+| `MAX_AUDIO_PREPARATIONS`, `SYNC_BUDGET_SECONDS` | Default eight preparations and a 40-second soft work budget, within the sync request timeout; audio streaming uses the Fluid compute duration default |
 | `MAX_AUTO_FEEDS` | Maximum automatically registered sources, default 50 |
 | `AUTO_REFRESH_SECONDS` | Minimum age for a normal request-triggered refresh, default 1800 seconds; incomplete preparation can resume sooner |
 
