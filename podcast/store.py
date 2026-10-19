@@ -107,7 +107,7 @@ class Store:
             values[self.key(feed, "manifest")] = compact(manifest)
         values.update(bodies or {})
         for track in tracks:
-            values[self.track_key(track["enclosure_path"])] = compact({k: track.get(k) for k in ("id", "webpage_url", "progressive_url", "length")})
+            values[self.track_key(track["enclosure_path"])] = compact({k: track.get(k) for k in ("id", "webpage_url", "progressive_url", "hls_url", "duration", "length", "audio_type")})
         keys = [self.key(feed, "lock"), *values]
         if self.command("EVAL", PUBLISH, len(keys), *keys, token, *values.values()) != 1:
             raise StorageError("Sync lock expired; publication cancelled")
@@ -119,7 +119,11 @@ class Store:
         return dict(zip(ids, values))
 
     def audio(self, track_path):
-        return self.get_json(f"{self.config.namespace}:audio:{hashlib.sha256(track_path.encode()).hexdigest()}")
+        value = self.get_json(f"{self.config.namespace}:audio:{hashlib.sha256(track_path.encode()).hexdigest()}")
+        try:
+            return unpack(value["packed"]) if value and "packed" in value else value
+        except (ValueError, OSError, TypeError) as exc:
+            raise StorageError("Invalid audio metadata") from exc
 
     def track_key(self, track_path):
         return f"{self.config.namespace}:track-path:{hashlib.sha256(track_path.encode()).hexdigest()}"
@@ -129,7 +133,7 @@ class Store:
 
     def cache_audio(self, track_path, info, ttl):
         if ttl > 0:
-            self.command("SET", f"{self.config.namespace}:audio:{hashlib.sha256(track_path.encode()).hexdigest()}", compact(info), "EX", ttl)
+            self.command("SET", f"{self.config.namespace}:audio:{hashlib.sha256(track_path.encode()).hexdigest()}", compact({"packed": pack(info)} if info.get("delivery") == "hls-m4a" else info), "EX", ttl)
 
     def expire_old_bodies(self, keys):
         for key in keys:

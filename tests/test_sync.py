@@ -174,3 +174,48 @@ def test_current_and_previous_bodies_are_retained(config, store, feed):
         prior = copy.deepcopy(manifest)
     assert set(retire) == {x["key"] for x in snapshots[0]["variants"].values()}
     assert not set(retire) & {x["key"] for x in snapshots[1]["variants"].values()}
+
+
+def test_migration_repairs_sized_old_episodes_preserving_identity(config, store, feed, monkeypatch):
+    config = replace(config, max_items=2, max_audio=1)
+    source = Source([track(1), track(2)])
+    run(config, store, source, feed)
+    run(config, store, source, feed)
+    publish(config, store, feed, no_consumer=True, minimum=2)
+    before = copy.deepcopy(store.state(feed))
+    source.pages[None]["entries"] = [track(i, progressive_url="", hls_url="https://api-v2.soundcloud.com/aac/" + str(i)) for i in (1, 2, 3)]
+    source.resolve_audio = lambda entry: {"type": "audio/mp4", "length": 9000 + int(entry["id"])}
+    first = run(config, store, source, feed)
+    assert first["published"] == 2 and store.status(feed)["repair_pending_count"] == 1
+    assert run(config, store, source, feed)["state"] == "published"
+    after = store.state(feed)
+    assert after["tracks"]["2"]["published_at"] == before["tracks"]["2"]["published_at"]
+    assert after["tracks"]["2"]["enclosure_path"] == before["tracks"]["2"]["enclosure_path"]
+    assert store.status(feed)["repair_pending_count"] == 0
+    body = store.body(store.manifest(feed)["variants"][config.bases[0]]["key"])
+    items = ET.fromstring(body).findall("./channel/item")
+    assert all(x.find("enclosure").get("type") == "audio/mp4" for x in items)
+    assert {x.findtext("guid") for x in items} == {"soundcloud:track:2", "soundcloud:track:3"}
+    assert run(config, store, source, feed)["state"] == "unchanged"
+
+
+def test_aac_cold_feed_is_prepared_and_old_unavailable_backoff_is_reset(config, store, feed):
+    source = Source([track(1, progressive_url="", retry_at=1900000000)])
+    source.bad.add("1")
+    run(config, store, source, feed)
+    source.bad.clear()
+    source.pages[None]["entries"] = [track(1, progressive_url="", hls_url="https://api-v2.soundcloud.com/aac/1")]
+    source.resolve_audio = lambda t: {"type": "audio/mp4", "length": 100}
+    assert run(config, store, source, feed)["ready"] == 1
+    assert Synchronizer(config, store, source).run("fresh/tracks", initial=True, activate=True)["published"] == 1
+
+
+def test_sync_restores_source_deadline_for_subsequent_runs(config, store, feed):
+    from types import SimpleNamespace
+    source = Source([track(1), track(2)])
+    source.deadline = None
+    source.ydl = SimpleNamespace(deadline=None)
+    config = replace(config, max_audio=1)
+    assert run(config, store, source, feed)['ready'] == 1
+    assert source.deadline is None and source.ydl.deadline is None
+    assert run(config, store, source, feed)['ready'] == 2

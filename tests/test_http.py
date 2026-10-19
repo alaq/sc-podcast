@@ -256,3 +256,27 @@ def test_qstash_key_rotation_body_url_and_expiry(server, source):
     for signed in (signature(config, "{}"), signature(config, raw, sub="https://attacker.invalid/api/sync"), signature(config, raw, exp=int(time.time()) - 60)):
         assert request("POST", "/api/sync", raw, {"Upstash-Signature": signed})[0] == 401
     assert request("POST", "/api/sync?wrong=1", raw, {"Upstash-Signature": signature(config, raw)})[0] == 404
+
+
+def test_m4a_head_ranges_if_range_and_cache_roundtrip(server, store, monkeypatch):
+    request, _ = server
+    body = b"header--fragment--tail"
+    info = {"delivery": "hls-m4a", "length": len(body), "type": "audio/mp4", "etag": '\"aac-test\"',
+            "expires_at": int(time.time()) + 300}
+    store.cache_audio("dj/aac", info, 120)
+    assert store.audio("dj/aac") == info
+    calls = []
+    def chunks(audio, start, end):
+        calls.append((start, end))
+        yield body[start:end + 1]
+    monkeypatch.setattr("podcast.hls.chunks", chunks)
+    status, headers, data = request("HEAD", "/track/dj/aac")
+    assert status == 200 and not data and not calls
+    assert headers["Content-Type"] == "audio/mp4" and int(headers["Content-Length"]) == len(body)
+    assert request(path="/track/dj/aac")[2] == body
+    status, headers, data = request(path="/track/dj/aac", headers={"Range": "bytes=6-11"})
+    assert status == 206 and data == body[6:12] and headers["Content-Range"] == f"bytes 6-11/{len(body)}"
+    assert request(path="/track/dj/aac", headers={"Range": "bytes=-4"})[2] == b"tail"
+    assert request(path="/track/dj/aac", headers={"Range": "bytes=999-"})[0] == 416
+    assert request(path="/track/dj/aac", headers={"Range": "bytes=0-0", "If-Range": info["etag"]})[2] == body[:1]
+    assert request(path="/track/dj/aac", headers={"Range": "bytes=0-0", "If-Range": '\"old\"'})[2] == body
