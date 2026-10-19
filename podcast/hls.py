@@ -34,7 +34,21 @@ def media_url(url):
     return url
 
 
+class TransientHLSError(HLSError):
+    pass
+
+
 def fetch(url, start=None, end=None, limit=MAX_FRAGMENT, deadline=None):
+    for attempt in range(2):
+        try:
+            return _fetch_once(url, start, end, limit, deadline)
+        except TransientHLSError:
+            if attempt or (deadline is not None and time.monotonic() + .25 >= deadline):
+                raise
+            time.sleep(.25)
+
+
+def _fetch_once(url, start=None, end=None, limit=MAX_FRAGMENT, deadline=None):
     media_url(url)
     timeout = 5 if deadline is None else min(5, deadline - time.monotonic())
     if timeout <= 0:
@@ -45,6 +59,8 @@ def fetch(url, start=None, end=None, limit=MAX_FRAGMENT, deadline=None):
     try:
         with requests.get(url, headers=headers, timeout=(min(2, timeout), timeout),
                           stream=True, allow_redirects=False) as response:
+            if response.status_code in (429, 500, 502, 503, 504):
+                raise TransientHLSError('Temporary audio source failure')
             total = None
             if start is not None:
                 match = re.fullmatch(r'bytes (\d+)-(\d+)/(\d+)', response.headers.get('Content-Range', ''))
@@ -65,7 +81,7 @@ def fetch(url, start=None, end=None, limit=MAX_FRAGMENT, deadline=None):
                 raise HLSError('Incomplete source range')
             return b''.join(chunks), total
     except requests.RequestException as exc:
-        raise HLSError('Audio source request failed') from exc
+        raise TransientHLSError('Audio source request failed') from exc
 
 
 def boxes(data):

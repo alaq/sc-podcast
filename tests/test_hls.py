@@ -108,3 +108,18 @@ def test_source_must_honor_exact_ranges_and_not_redirect(monkeypatch):
         return Response()
     monkeypatch.setattr(hls.requests, 'get', get)
     with pytest.raises(hls.HLSError, match='honor'): hls.fetch(HOST + 'file', 0, 0)
+
+
+def test_transient_source_fetch_retries_once_but_rejects_bad_ranges(monkeypatch):
+    calls = []
+    def once(*args):
+        calls.append(args)
+        if len(calls) == 1: raise hls.TransientHLSError('Temporary failure')
+        return b'ok', 2
+    monkeypatch.setattr(hls, '_fetch_once', once)
+    monkeypatch.setattr(hls.time, 'sleep', lambda _: None)
+    assert hls.fetch(HOST + 'file') == (b'ok', 2)
+    assert len(calls) == 2
+    def fail(*args): raise hls.TransientHLSError('Still unavailable')
+    monkeypatch.setattr(hls, '_fetch_once', fail)
+    with pytest.raises(hls.TransientHLSError): hls.fetch(HOST + 'file')

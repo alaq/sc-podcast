@@ -20,8 +20,12 @@ def ready_entries(state, limit):
 
 
 def needs_audio(track):
-    return not track.get("length") or (track.get("hls_url") and not track.get("progressive_url")
-                                       and track.get("audio_type") != "audio/mp4")
+    # Revalidate retained MP3 metadata once, including episodes beyond the head
+    # listing. AAC metadata already prepared by the first repair is current.
+    return (not track.get("length")
+            or (track.get("audio_type") != "audio/mp4" and not track.get("audio_format_version"))
+            or (track.get("hls_url") and not track.get("progressive_url")
+                and track.get("audio_type") != "audio/mp4"))
 
 
 def migration_entries(state, limit=None):
@@ -71,7 +75,8 @@ class Synchronizer:
             head = self.source.listing(feed)
             signature = digest({"entries": head["entries"], "title": head["title"], "image": head.get("image")})
             retry_due = status.get("retry_at", 0) and status["retry_at"] <= now
-            if signature == status.get("head_signature") and not retry_due and not status.get("has_more"):
+            if (signature == status.get("head_signature") and not retry_due and not status.get("has_more")
+                    and status.get("audio_format_version") == 2):
                 status.update(last_checked_at=now, last_success_at=now, error=None)
                 self.store.commit(feed, token, status)
                 return {"state": "unchanged", "feed": feed, "count": status.get("published_count", 0)}
@@ -152,7 +157,7 @@ class Synchronizer:
                         self.source.deadline = min(source_deadline or float("inf"), deadline - (0.5 if initial else 5))
                         self.source.ydl.deadline = self.source.deadline
                     audio = self.source.resolve_audio(track)
-                    track.update(length=audio["length"], audio_type=audio["type"], prepared_at=now, retry_at=0, error=None)
+                    track.update(length=audio["length"], audio_type=audio["type"], audio_format_version=2, prepared_at=now, retry_at=0, error=None)
                     prepared.append(track)
                     ttl = max(0, min(120, audio.get("expires_at", 0) - now - 30))
                     try:
@@ -170,7 +175,7 @@ class Synchronizer:
             retry_at = min((x.get("retry_at") or now for x in eligible), default=0)
             status.update(retry_at=retry_at, has_more=bool(pending or (len(ready) + sum(not x.get("attempts") for x in remaining) < self.config.max_items and state.get("backfill_cursor"))),
                           discovered_count=len(state["tracks"]), ready_count=len(ready), repair_pending_count=sum(bool(x.get("length")) for x in eligible), unavailable_count=sum(bool(x.get("attempts")) for x in eligible),
-                          rollout_ready=state.get("rollout_ready", False), last_success_at=now)
+                          rollout_ready=state.get("rollout_ready", False), last_success_at=now, audio_format_version=2)
             manifest, bodies, retired = None, {}, []
             if publish and state.get("rollout_ready"):
                 manifest, bodies, retired = build_snapshot(self.store, self.config, feed, state, self.store.manifest(feed), now)
