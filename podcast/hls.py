@@ -19,6 +19,7 @@ MAX_SEGMENTS = 8640
 MAX_FRAGMENT = 4 * 1024 * 1024
 MAX_FILE = 2 * 1024 * 1024 * 1024
 CONCURRENCY = 12
+HEADER_CONCURRENCY = 24
 
 
 class HLSError(RuntimeError):
@@ -218,7 +219,7 @@ def initialization(data, total_ticks, scale, ident):
 
 
 def prepare(url, expected_duration, deadline=None):
-    deadline = min(deadline or float("inf"), time.monotonic() + 20)
+    deadline = min(deadline or float("inf"), time.monotonic() + 40)
     raw, _ = fetch(url, limit=4 * 1024 * 1024, deadline=deadline)
     try:
         init_url, urls, duration = playlist(raw.decode('utf-8'), url)
@@ -227,7 +228,7 @@ def prepare(url, expected_duration, deadline=None):
     if expected_duration and abs(duration - expected_duration) > max(2, expected_duration * .001):
         raise HLSError('Audio is not full length')
     init, _ = fetch(init_url, limit=65536, deadline=deadline)
-    with ThreadPoolExecutor(max_workers=CONCURRENCY) as pool:
+    with ThreadPoolExecutor(max_workers=HEADER_CONCURRENCY) as pool:
         segments = list(pool.map(lambda u: segment_header(u, deadline), urls))
     ident, scale, ticks = segments[0]['id'], segments[0]['scale'], 0
     for segment in segments:

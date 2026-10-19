@@ -73,7 +73,7 @@ Fill `.env` locally; it is gitignored. Configure the same variables in Vercel:
 | `QSTASH_TOKEN` | Schedule management and automatic background preparation |
 | `QSTASH_URL` | Optional regional QStash API origin for enqueueing and the CLI, as shown in your console |
 | `SYNC_URL` | Exact public `/api/sync` URL used as the QStash JWT audience |
-| `MAX_AUDIO_PREPARATIONS`, `SYNC_BUDGET_SECONDS` | Default eight preparations and a 40-second soft work budget, within Vercel's 60-second function limit |
+| `MAX_AUDIO_PREPARATIONS`, `SYNC_BUDGET_SECONDS` | Default eight preparations and a 40-second soft work budget, within the sync request timeout; audio streaming has a 300-second function ceiling |
 | `MAX_AUTO_FEEDS` | Maximum automatically registered sources, default 50 |
 | `AUTO_REFRESH_SECONDS` | Minimum age for a normal request-triggered refresh, default 1800 seconds; incomplete preparation can resume sooner |
 
