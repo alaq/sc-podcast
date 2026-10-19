@@ -67,7 +67,7 @@ def render(feed, entries, base, title=None, image=None):
         guid = track.get("guid_by_base", {}).get(base) or (url if track.get("legacy_identity") else "soundcloud:track:" + track["id"])
         tag(item, "guid", guid, isPermaLink="false")
         tag(item, "pubDate", format_datetime(datetime.fromtimestamp(track["published_at"], timezone.utc), usegmt=True))
-        ET.SubElement(item, "enclosure", url=url, length=str(track["length"]), type="audio/mpeg")
+        ET.SubElement(item, "enclosure", url=url, length=str(track["length"]), type=track.get("audio_type") or "audio/mpeg")
         tag(item, f"{{{ITUNES}}}duration", int(track.get("duration") or 0))
         if track.get("artwork"):
             # Upgrade retained metadata too, including tracks outside the latest

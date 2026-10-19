@@ -19,6 +19,11 @@ def ready_entries(state, limit):
                   key=lambda x: (x.get("liked_at", 0), x["id"]), reverse=True)[:limit]
 
 
+def needs_audio(track):
+    return not track.get("length") or (track.get("hls_url") and not track.get("progressive_url")
+                                       and track.get("audio_type") != "audio/mp4")
+
+
 def migration_entries(state, limit=None):
     """All discovered history, including unavailable sets that may recover later."""
     cutoff = state.get("bootstrap_at", 0)
@@ -56,6 +61,7 @@ class Synchronizer:
         if not token:
             return {"state": "already_running", "feed": feed}
         status = {}
+        source_deadline = getattr(self.source, "deadline", None)
         deadline = deadline if deadline is not None else self.monotonic() + self.config.budget_seconds
         now = int(self.clock())
         try:
@@ -111,6 +117,8 @@ class Synchronizer:
                         merged[key] = seed[key]
                 if not merged.get("published_at"):
                     merged["published_at"] = epoch(legacy_dates.get(entry["id"])) or entry.get("liked_at") or now
+                if entry.get("hls_url") and not old.get("hls_url"):
+                    merged["retry_at"] = 0  # New support should not inherit the MP3-only backoff.
                 if old != merged:
                     state["tracks"][entry["id"]] = merged
                     changed.append(merged)
@@ -130,9 +138,9 @@ class Synchronizer:
                     break
                 if initial and len(ready_entries(state, self.config.max_items)) >= min(5, self.config.max_items):
                     break
-                if track.get("length") or track.get("retry_at", 0) > now:
+                if not needs_audio(track) or track.get("retry_at", 0) > now:
                     continue
-                if initial and not track.get("progressive_url"):
+                if initial and not (track.get("progressive_url") or track.get("hls_url")):
                     continue  # Leave slower fallback resolution to the background worker.
                 # Retain all discovered metadata, but prepare only the useful window.
                 ready = ready_entries(state, self.config.max_items)
@@ -140,8 +148,11 @@ class Synchronizer:
                     continue
                 attempts += 1
                 try:
+                    if hasattr(self.source, "deadline"):
+                        self.source.deadline = min(source_deadline or float("inf"), deadline - (0.5 if initial else 5))
+                        self.source.ydl.deadline = self.source.deadline
                     audio = self.source.resolve_audio(track)
-                    track.update(length=audio["length"], audio_type="audio/mpeg", prepared_at=now, retry_at=0, error=None)
+                    track.update(length=audio["length"], audio_type=audio["type"], prepared_at=now, retry_at=0, error=None)
                     prepared.append(track)
                     ttl = max(0, min(120, audio.get("expires_at", 0) - now - 30))
                     try:
@@ -153,12 +164,12 @@ class Synchronizer:
                 except SourceError:
                     count = track.get("attempts", 0) + 1
                     track.update(attempts=count, retry_at=now + min(21600, 900 * 2 ** min(count - 1, 5)), error="audio_unavailable")
-            remaining = [x for x in ordered if not x.get("length")]
+            remaining = [x for x in ordered if needs_audio(x)]
             ready = ready_entries(state, self.config.max_items)
-            eligible = remaining if len(ready) < self.config.max_items else [x for x in remaining if (x.get("liked_at", 0), x["id"]) > (ready[-1].get("liked_at", 0), ready[-1]["id"])]
+            eligible = remaining if len(ready) < self.config.max_items else [x for x in remaining if (x.get("liked_at", 0), x["id"]) >= (ready[-1].get("liked_at", 0), ready[-1]["id"])]
             retry_at = min((x.get("retry_at") or now for x in eligible), default=0)
             status.update(retry_at=retry_at, has_more=bool(pending or (len(ready) + sum(not x.get("attempts") for x in remaining) < self.config.max_items and state.get("backfill_cursor"))),
-                          discovered_count=len(state["tracks"]), ready_count=len(ready), unavailable_count=sum(bool(x.get("attempts")) for x in eligible),
+                          discovered_count=len(state["tracks"]), ready_count=len(ready), repair_pending_count=sum(bool(x.get("length")) for x in eligible), unavailable_count=sum(bool(x.get("attempts")) for x in eligible),
                           rollout_ready=state.get("rollout_ready", False), last_success_at=now)
             manifest, bodies, retired = None, {}, []
             if publish and state.get("rollout_ready"):
@@ -181,6 +192,9 @@ class Synchronizer:
                 pass
             raise
         finally:
+            if hasattr(self.source, "deadline"):
+                self.source.deadline = source_deadline
+                self.source.ydl.deadline = source_deadline
             try:
                 self.store.release(feed, token)
             except StorageError:

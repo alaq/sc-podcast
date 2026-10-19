@@ -16,6 +16,7 @@ from yt_dlp.extractor.soundcloud import SoundcloudUserIE
 from yt_dlp.networking import Request
 
 from podcast.artwork import episode_artwork
+from podcast import hls
 
 
 class SourceError(RuntimeError):
@@ -81,6 +82,12 @@ def normalize_track(raw, liked_at=None):
                         if x.get("format", {}).get("protocol") == "progressive"
                         and x.get("format", {}).get("mime_type", "").split(";")[0] == "audio/mpeg"
                         and not x.get("snipped") and "/preview/" not in x.get("url", "")), {})
+    aac = next((x for x in sorted(raw.get("media", {}).get("transcodings", []),
+                                 key=lambda x: x.get("quality") == "sq", reverse=True)
+                if x.get("format", {}).get("protocol") == "hls"
+                and x.get("format", {}).get("mime_type", "").split(";")[0] == "audio/mp4"
+                and "mp4a.40.2" in x.get("format", {}).get("mime_type", "")
+                and not x.get("snipped") and "/preview/" not in x.get("url", "")), {})
     created = epoch(raw.get("created_at")) or 0
     artwork = raw.get("artwork_url") or raw.get("user", {}).get("avatar_url") or ""
     return {
@@ -92,7 +99,7 @@ def normalize_track(raw, liked_at=None):
         "enclosure_path": parsed.path.strip("/"),
         "artwork": episode_artwork(artwork),
         "original_published_at": created, "liked_at": epoch(liked_at) or created,
-        "progressive_url": progressive.get("url", ""),
+        "progressive_url": progressive.get("url", ""), "hls_url": aac.get("url", ""),
     }
 
 
@@ -197,25 +204,41 @@ class SoundCloud:
         return {"entries": entries, "next": clean_cursor(data.get("next_href")), "title": title, "image": image, "skipped": skipped}
 
     def resolve_audio(self, track):
-        progressive = track.get("progressive_url")
-        if not progressive:
-            raw = self.api("https://api-v2.soundcloud.com/resolve", query={"url": track["webpage_url"]})
-            fresh = normalize_track(raw)
-            progressive = fresh.get("progressive_url") if fresh else None
-        if not progressive:
-            raise SourceError("No full-length progressive MP3 is available")
+        # Refresh at most once if a retained transcoding endpoint disappeared.
+        fresh = None
+        endpoint = track.get("progressive_url") or track.get("hls_url")
+        if not endpoint:
+            fresh = normalize_track(self.api("https://api-v2.soundcloud.com/resolve", query={"url": track["webpage_url"]}))
+            if fresh:
+                track.update({k: fresh[k] for k in ("progressive_url", "hls_url", "duration")})
+            endpoint = track.get("progressive_url") or track.get("hls_url")
+        if not endpoint:
+            raise SourceError("No full-length supported audio is available")
         try:
-            data = self.api(progressive)
+            data = self.api(endpoint)
         except SourceDeadline:
             raise
         except SourceError:
-            # Stored transcoding endpoints can change. Re-resolve once, never loop.
-            raw = self.api("https://api-v2.soundcloud.com/resolve", query={"url": track["webpage_url"]})
-            fresh = normalize_track(raw)
-            if not fresh or not fresh.get("progressive_url") or fresh["progressive_url"] == progressive:
+            if fresh is not None:
                 raise
-            track["progressive_url"] = fresh["progressive_url"]
-            data = self.api(fresh["progressive_url"])
+            fresh = normalize_track(self.api("https://api-v2.soundcloud.com/resolve", query={"url": track["webpage_url"]}))
+            replacement = (fresh.get("progressive_url") or fresh.get("hls_url")) if fresh else None
+            if not replacement or replacement == endpoint:
+                raise
+            track.update({k: fresh[k] for k in ("progressive_url", "hls_url", "duration")})
+            endpoint = replacement
+            data = self.api(endpoint)
+        if not track.get("progressive_url"):
+            try:
+                audio = hls.prepare(data.get("url", ""), track.get("duration"), getattr(self, "deadline", None))
+            except hls.HLSError as exc:
+                if getattr(self, "deadline", None) is not None and time.monotonic() >= self.deadline:
+                    raise SourceDeadline("Audio preparation budget exhausted") from exc
+                raise SourceError("Full-length AAC preparation failed") from exc
+            expiry = signed_url_expiry(audio["segments"][0]["url"])
+            if expiry is not None:
+                audio["expires_at"] = min(audio["expires_at"], expiry)
+            return audio
         url = data.get("url", "")
         parsed = urlsplit(url)
         if parsed.scheme != "https" or not (parsed.hostname or "").endswith(".sndcdn.com"):

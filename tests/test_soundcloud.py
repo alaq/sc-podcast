@@ -115,3 +115,41 @@ def test_config_preview_isolation_and_allowed_origins(monkeypatch):
 @pytest.mark.parametrize("path", ["../../secret", "user/likes/extra", "user/%0a"])
 def test_invalid_feed_paths(path):
     with pytest.raises(ValueError): normalize_feed(path)
+
+
+def test_full_aac_hls_is_preferred_over_preview_and_prepared(monkeypatch):
+    raw = raw_track()
+    raw["media"]["transcodings"] = [
+        {"url": "https://api-v2.soundcloud.com/preview/42", "snipped": True, "quality": "sq",
+         "format": {"protocol": "hls", "mime_type": 'audio/mp4; codecs="mp4a.40.2"'}},
+        {"url": "https://api-v2.soundcloud.com/aac/42", "quality": "sq",
+         "format": {"protocol": "hls", "mime_type": 'audio/mp4; codecs="mp4a.40.2"'}}]
+    track = normalize_track(raw)
+    assert not track["progressive_url"] and track["hls_url"].endswith("/aac/42")
+    source = object.__new__(SoundCloud)
+    calls = []
+    source.api = lambda url, **kw: calls.append(url) or {"url": "https://cf-media.sndcdn.com/index.m3u8"}
+    def prepare(url, duration, deadline):
+        assert duration == 7200 and url.endswith("index.m3u8")
+        return {"type": "audio/mp4", "length": 123, "expires_at": 2000000000,
+                "segments": [{"url": "https://cf-media.sndcdn.com/1?Expires=1900000000"}]}
+    monkeypatch.setattr("podcast.hls.prepare", prepare)
+    audio = source.resolve_audio(track)
+    assert audio["type"] == "audio/mp4" and audio["expires_at"] == 1900000000
+    assert calls == [track["hls_url"]]
+
+
+def test_retained_mp3_endpoint_can_migrate_to_aac(monkeypatch):
+    raw = raw_track()
+    raw["media"]["transcodings"] = [{"url": "https://api-v2.soundcloud.com/aac/42",
+        "format": {"protocol": "hls", "mime_type": 'audio/mp4; codecs="mp4a.40.2"'}}]
+    source = object.__new__(SoundCloud)
+    def api(url, **kwargs):
+        if url.endswith("/old"): raise SourceError("Gone")
+        if url.endswith("/resolve"): return raw
+        return {"url": "https://cf-media.sndcdn.com/index.m3u8"}
+    source.api = api
+    monkeypatch.setattr("podcast.hls.prepare", lambda *a: {"type": "audio/mp4", "expires_at": 2000000000, "segments": [{"url": "https://cf-media.sndcdn.com/1"}]})
+    track = {"webpage_url": raw["permalink_url"], "progressive_url": "https://api-v2.soundcloud.com/old"}
+    assert source.resolve_audio(track)["type"] == "audio/mp4"
+    assert not track["progressive_url"] and track["hls_url"].endswith("/aac/42")
