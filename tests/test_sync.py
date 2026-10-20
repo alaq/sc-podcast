@@ -176,26 +176,22 @@ def test_current_and_previous_bodies_are_retained(config, store, feed):
     assert not set(retire) & {x["key"] for x in snapshots[1]["variants"].values()}
 
 
-def test_migration_repairs_sized_old_episodes_preserving_identity(config, store, feed, monkeypatch):
-    config = replace(config, max_items=2, max_audio=1)
+def test_hls_only_listing_preserves_existing_mp3_endpoints_and_enclosures(config, store, feed):
     source = Source([track(1), track(2)])
-    run(config, store, source, feed)
     run(config, store, source, feed)
     publish(config, store, feed, no_consumer=True, minimum=2)
     before = copy.deepcopy(store.state(feed))
-    source.pages[None]["entries"] = [track(i, progressive_url="", hls_url="https://api-v2.soundcloud.com/aac/" + str(i)) for i in (1, 2, 3)]
-    source.resolve_audio = lambda entry: {"type": "application/vnd.apple.mpegurl", "length": 9000 + int(entry["id"])}
-    first = run(config, store, source, feed)
-    assert first["published"] == 2 and store.status(feed)["repair_pending_count"] == 1
-    assert run(config, store, source, feed)["state"] == "published"
+    calls = list(source.audio_calls)
+    source.pages[None]["entries"] = [track(i, progressive_url="", hls_url="https://api-v2.soundcloud.com/aac/" + str(i)) for i in (1, 2)]
+    run(config, store, source, feed)
     after = store.state(feed)
-    assert after["tracks"]["2"]["published_at"] == before["tracks"]["2"]["published_at"]
-    assert after["tracks"]["2"]["enclosure_path"] == before["tracks"]["2"]["enclosure_path"]
-    assert store.status(feed)["repair_pending_count"] == 0
+    for ident in ("1", "2"):
+        for key in ("progressive_url", "length", "audio_type", "published_at", "enclosure_path"):
+            assert after["tracks"][ident][key] == before["tracks"][ident][key]
+        assert store.track(after["tracks"][ident]["enclosure_path"])["progressive_url"]
+    assert source.audio_calls == calls  # A listing omission is not a format migration.
     body = store.body(store.manifest(feed)["variants"][config.bases[0]]["key"])
-    items = ET.fromstring(body).findall("./channel/item")
-    assert all(x.find("enclosure").get("type") == "application/vnd.apple.mpegurl" for x in items)
-    assert {x.findtext("guid") for x in items} == {"soundcloud:track:2", "soundcloud:track:3"}
+    assert all(x.find("enclosure").get("type") == "audio/mpeg" for x in ET.fromstring(body).findall("./channel/item"))
     assert run(config, store, source, feed)["state"] == "unchanged"
 
 

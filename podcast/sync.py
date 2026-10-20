@@ -114,6 +114,11 @@ class Synchronizer:
                 old = state["tracks"].get(entry["id"], {})
                 seed = state.get("legacy_seeds", {}).get(entry["enclosure_path"], {})
                 merged = {**old, **entry}
+                # SoundCloud can omit MP3 from current listings while an older
+                # progressive endpoint still resolves to the original full file.
+                # Absence from a listing is not evidence that a saved link died.
+                if not entry.get("progressive_url") and old.get("progressive_url"):
+                    merged["progressive_url"] = old["progressive_url"]
                 for key in ("enclosure_path", "published_at", "legacy_identity", "guid_by_base"):
                     if key in old:
                         merged[key] = old[key]
