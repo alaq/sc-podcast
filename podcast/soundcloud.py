@@ -216,6 +216,7 @@ class SoundCloud:
             endpoint = track.get("progressive_url") or track.get("hls_url")
         if not endpoint:
             raise SourceError("No full-length supported audio is available")
+        progressive = bool(track.get("progressive_url"))
         try:
             data = self.api(endpoint)
         except SourceDeadline:
@@ -227,7 +228,12 @@ class SoundCloud:
             replacement = (fresh.get("progressive_url") or fresh.get("hls_url")) if fresh else None
             if not replacement or replacement == endpoint:
                 raise
-            track.update({k: fresh[k] for k in ("progressive_url", "hls_url", "duration")})
+            # Keep the saved MP3 candidate even after a temporary source failure.
+            # A missing entry in fresh metadata must not erase a usable old URL.
+            track.update({k: fresh[k] for k in ("hls_url", "duration")})
+            if fresh.get("progressive_url"):
+                track["progressive_url"] = fresh["progressive_url"]
+            progressive = bool(fresh.get("progressive_url"))
             endpoint = replacement
             data = self.api(endpoint)
         url = data.get("url", "")
@@ -237,7 +243,7 @@ class SoundCloud:
                 or not ((parsed.hostname or "").endswith(".sndcdn.com")
                         or parsed.hostname == "playback.media-streaming.soundcloud.cloud")):
             raise SourceError("Unexpected audio host")
-        if not track.get("progressive_url"):
+        if not progressive:
             return self.resolve_playlist(url)
         try:
             timeout = (3, 5)

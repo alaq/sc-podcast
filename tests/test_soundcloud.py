@@ -150,7 +150,7 @@ def test_retained_mp3_endpoint_can_migrate_to_aac(monkeypatch):
     source.session = playlist_session()
     track = {"webpage_url": raw["permalink_url"], "progressive_url": "https://api-v2.soundcloud.com/old"}
     assert source.resolve_audio(track)["type"] == "application/vnd.apple.mpegurl"
-    assert not track["progressive_url"] and track["hls_url"].endswith("/aac/42")
+    assert track["progressive_url"].endswith("/old") and track["hls_url"].endswith("/aac/42")
 
 
 PLAYLIST = (b'#EXTM3U\n#EXT-X-MAP:URI="https://cf-media.sndcdn.com/init"\n'
@@ -183,3 +183,34 @@ def test_playlist_checks_are_bounded_and_never_accept_media_as_playlist(body, mi
     source.session = playlist_session(body, mime)
     with pytest.raises(SourceError):
         source.resolve_playlist("https://cf-media.sndcdn.com/index.m3u8")
+
+
+def test_temporary_mp3_resolution_failure_does_not_forget_working_legacy_link():
+    raw = raw_track()
+    raw['media']['transcodings'] = [{'url': 'https://api-v2.soundcloud.com/aac/42',
+        'format': {'protocol': 'hls', 'mime_type': 'audio/mp4; codecs="mp4a.40.2"'}}]
+    source = object.__new__(SoundCloud)
+    attempts = []
+    def api(url, **kwargs):
+        if url.endswith('/resolve'): return raw
+        if url.endswith('/old'):
+            attempts.append(url)
+            if len(attempts) == 1: raise SourceError('Temporary failure')
+            return {'url': 'https://cf-media.sndcdn.com/original.mp3?Expires=1900000000'}
+        return {'url': 'https://cf-media.sndcdn.com/index.m3u8'}
+    class MP3Response:
+        headers = {'Content-Type': 'audio/mpeg', 'Content-Range': 'bytes 0-0/123456789'}
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def raise_for_status(self): pass
+    playlist_get = playlist_session().get
+    def get(url, **kwargs):
+        if '.mp3?' in url: return MP3Response()
+        return playlist_get(url, **kwargs)
+    source.api, source.session = api, SimpleNamespace(get=get)
+    track = {'webpage_url': raw['permalink_url'], 'progressive_url': 'https://api-v2.soundcloud.com/old'}
+    assert source.resolve_audio(track)['type'] == 'application/vnd.apple.mpegurl'
+    assert track['progressive_url'].endswith('/old')
+    recovered = source.resolve_audio(track)
+    assert recovered['type'] == 'audio/mpeg' and recovered['length'] == 123456789
+    assert len(attempts) == 2
