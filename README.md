@@ -14,7 +14,7 @@ RSS requests normally read a prepared snapshot from Upstash Redis. For a brand-n
 - Episodes use the Like date, stable IDs, fixed enclosure URLs, actual audio sizes, artwork, and durations. Existing episodes retain their seeded dates and enclosure identities during migration.
 - Episode artwork uses SoundCloud's 3000×3000 rendition to meet [Apple Podcasts' artwork dimensions](https://podcasters.apple.com/support/5516-episode-art-template). Images load directly from SoundCloud; feed requests never fetch or resize them. Retained 500×500 artwork URLs are upgraded when the snapshot is next published.
 
-Previously discovered sets remain in the archive; unliking does not retract a published episode. Full progressive MP3 and unencrypted AAC-LC HLS renditions are supported. Unavailable, preview-only, encrypted, and unsupported-format tracks are retried separately and do not block other episodes. A Like of an entire playlist is skipped; Like individual sets to include them. A configured playlist source supports its first 200 tracks.
+Previously discovered sets remain in the archive; unliking does not retract a published episode. Full progressive MP3 files can be delivered directly. For feeds enabled in `R2_FEEDS`, unencrypted AAC-LC HLS is prepared as a complete M4A file in R2; other feeds retain link-only delivery, whose HLS compatibility depends on the client. Unavailable, preview-only, encrypted, and unsupported-format tracks are retried separately and do not block other episodes. A Like of an entire playlist is skipped; Like individual sets to include them. A configured playlist source supports its first 200 tracks.
 
 ## Add a SoundCloud page
 
@@ -40,10 +40,13 @@ Other feeds: client request → saved RSS + one-off QStash work when due
 New RSS URL → Redis registration + metadata → first five episodes → background batches
 Podcast app → Vercel CDN → Redis manifest + saved RSS
 Podcast app → /track/artist/set → temporary 302 → SoundCloud MP3 CDN
-                              → streamed, seekable M4A → SoundCloud AAC fragments
+                              → signed 302 → completed private R2 M4A
+Background sync → SoundCloud AAC fragments → bounded multipart upload → R2
 ```
 
-Redis holds compressed discovery state, fixed publication dates, permanent track-path mappings, current/previous RSS snapshots, and a two-minute cache of signed SoundCloud links. Every audio endpoint returns an empty HTTP 302 redirect, including HEAD and range requests. Vercel never downloads, assembles, stores or serves audio files. Progressive MP3 links remain preferred; full AAC HLS playlist links are used when MP3 is unavailable. Only bounded playlist metadata is read, and RSS records its actual MIME and length. HLS playback and offline downloads depend on the podcast client; a resolved playlist is not a downloadable M4A. Existing episode IDs, dates and enclosure paths are preserved while metadata is refreshed. Cached descriptors from the former M4A proxy are ignored. The existing `KV_REST_API_*` variables work; the service is now Upstash Redis following Vercel KV's migration.
+Redis holds compressed discovery state, fixed publication dates, permanent track-path mappings, current/previous RSS snapshots, and a short cache of SoundCloud links. Every audio endpoint returns an empty HTTP 302 redirect, including HEAD and range requests. Listener audio never passes through Vercel. With R2 enabled for a feed, authenticated background jobs assemble AAC fragments into an indexed M4A and stream it to private object storage in 8 MiB parts; neither a full temporary file nor transcoding is required. The original episode URL redirects to a fresh R2 signature for the request's GET or HEAD method. HTTP range requests go directly to R2. Genuine progressive MP3 files can still redirect to SoundCloud.
+
+An object becomes eligible for publication only after multipart completion and a size/type/duration read-back. Completed objects are reused if a job lost its response or failed to save Redis state. Interrupted uploads are aborted where possible; retain R2's incomplete-multipart cleanup lifecycle for hard process termination. Existing episode IDs, dates and enclosure paths remain stable. New AAC items are prepared only by background jobs. During migration, existing HLS entries retain their old metadata until their complete files are ready; `repair_pending_count` reports the remaining work. A successful source check alone does not establish podcast compatibility.
 
 Feed responses support `HEAD`, gzip, ETags and `Last-Modified`. Unchanged conditional requests avoid reading the large RSS body; secondary feeds also read their small status record to decide whether to enqueue work. Snapshot publication is atomic and guarded by an expiring lock with an ownership check. Failed discovery/preparation leaves the previous feed available. A Redis outage can still affect an uncached origin read; the CDN is a cache, not an independent durable replica.
 
@@ -73,13 +76,21 @@ Fill `.env` locally; it is gitignored. Configure the same variables in Vercel:
 | `QSTASH_TOKEN` | Schedule management and automatic background preparation |
 | `QSTASH_URL` | Optional regional QStash API origin for enqueueing and the CLI, as shown in your console |
 | `SYNC_URL` | Exact public `/api/sync` URL used as the QStash JWT audience |
-| `MAX_AUDIO_PREPARATIONS`, `SYNC_BUDGET_SECONDS` | Default eight preparations and a 40-second soft work budget, within the sync request timeout; audio streaming uses the Fluid compute duration default |
+| `MAX_AUDIO_PREPARATIONS`, `SYNC_BUDGET_SECONDS` | Default eight preparations and a 40-second soft work budget; use 230 seconds for R2 preparation, below the Fluid duration default |
 | `MAX_AUTO_FEEDS` | Maximum automatically registered sources, default 50 |
 | `AUTO_REFRESH_SECONDS` | Minimum age for a normal request-triggered refresh, default 1800 seconds; incomplete preparation can resume sooner |
 
 New sources do not need an allowlist edit, manual publication or any recurring schedule. Use `podcast.cli schedule create` for the main feed only. If upgrading from the shared-tick deployment, this updates the same existing schedule ID to `{"feed":"kado-nyc/likes"}`. The old `{"tick":true}` endpoint and `--shared` option remain compatible but now process only the main feed, ignoring historical secondary entries in the due index. `podcast.cli tick` also refreshes only the main feed. Snapshot and registration keys require no migration.
 
 Preview deployments automatically append a branch hash to the Redis namespace and disable Overcast pings and background-message dispatch. A direct new RSS request still prepares its first episodes. To continue preparation in that namespace locally, use `VERCEL_ENV=preview` and the branch name in `VERCEL_GIT_COMMIT_REF`, then `podcast.cli --feed source/tracks sync`. For browser testing, include the preview origin in `PUBLIC_BASE_URLS`. Keep its `SYNC_URL` consistent with the deployment when testing signed requests, and account for deployment protection. Preview registration never queues production jobs.
+
+## R2 audio preparation
+
+Create a private R2 Standard bucket and a bucket-scoped Object Read & Write token. Public bucket access and a DNS migration are unnecessary: the stable Vercel enclosure route signs a GET or HEAD redirect valid for 24 hours. A trusted public base can optionally be configured for an existing production custom domain.
+
+Configure `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, and `R2_BUCKET` as secrets in Vercel. `R2_FEEDS` defaults to `kado-nyc/likes`, so unrelated automatically registered sources do not start storing audio. `R2_AUDIO_PREFIX` defaults to `audio-v1`; preview builds append `/preview` and keep their isolated Redis namespace. Enable `SYNC_BUDGET_SECONDS=230` for long episodes and recreate the same QStash schedule to update its delivery timeout. Do not add a plan-incompatible `maxDuration` override. The feed lock outlives the work budget and still fences publication.
+
+Before production activation, test a preview's completed file with GET, HEAD, a nonzero byte range and a resumed download, then verify MIME, length, duration and decoding. Capture existing production GUID/date/enclosure triples; compare them after bounded migration. Keep announcement state unchanged. `R2_BUCKET` being empty leaves the original link-only path available for rollback, but HLS-only sources will again lack a compatible full-file URL. Do not delete prepared objects or Redis metadata during rollback.
 
 ## Safe rollout of the existing feed
 
@@ -113,7 +124,7 @@ Do this against the new production namespace **while the old deployment is still
    .venv/bin/python -m podcast.cli schedule status
    ```
 
-   The stable schedule ID makes retries update the existing schedule. Delivery uses a signed POST every five minutes, a 60-second timeout, and at most two retries. The endpoint checks the body hash, exact destination, issuer, expiry, and current/next signing keys. No sync token is forwarded by QStash.
+   The stable schedule ID makes retries update the existing schedule. Delivery uses a signed POST every five minutes, a timeout of at least 60 seconds (the work budget plus 20 seconds for longer jobs), and at most two retries. The endpoint checks the body hash, exact destination, issuer, expiry, and current/next signing keys. No sync token is forwarded by QStash.
 6. Read back RSS counts, HEAD, conditional 304, MP3 redirect/range behavior, `/status`, QStash delivery logs, and the announcement database counts. On devices, confirm existing play state and downloads in Overcast and Apple Podcasts, including seeking/resuming an older set. Local protocol tests cannot prove a particular app version's migration behavior.
 
 Automatically registered sources publish incrementally as soon as real episodes are ready and have no announcement consumer attached. For a manually prepared legacy/isolated feed **with no announcement consumer**, `publish --no-announcement-consumer` remains available. Never bypass the ACSv3 production migration gate.
@@ -131,7 +142,7 @@ The tests use synthetic SoundCloud responses and execute actual Redis commands/L
 
 ## Cost for ten listeners
 
-Reuse the existing database and Vercel plan. One five-minute QStash schedule is **288 deliveries/day** (at most 864 with both retries every time), within the current 1,000/day free allowance before unrelated usage. Redis Free currently includes 256 MB, 500K commands/month, and 10 GB bandwidth. Redis PAYG is $0.20/100K commands; the ten-listener estimate of roughly 130K–245K monthly commands is about **$0.26–$0.49 in command charges** if paid. Storage is metadata/XML. MP3 downloads go directly to SoundCloud; AAC downloads now pass through Vercel and count toward its transfer and function usage. The earlier cost estimate below did not include AAC delivery; no new storage service or plan upgrade is configured.
+Reuse the existing database and Vercel plan. One five-minute QStash schedule is **288 deliveries/day** (at most 864 with both retries every time), within the current 1,000/day free allowance before unrelated usage. Redis Free currently includes 256 MB, 500K commands/month, and 10 GB bandwidth. Redis PAYG is $0.20/100K commands; the ten-listener estimate of roughly 130K–245K monthly commands is about **$0.26–$0.49 in command charges** if paid. Storage is metadata/XML. MP3 downloads go directly to SoundCloud. For enabled R2 feeds, AAC files are uploaded once by Vercel and downloaded directly from R2. At the October 20 collection size, budgeting 32 GB of R2 Standard storage costs approximately $0.33/month after the 10 GB free allowance; R2 internet egress is free. Compute and request charges depend on usage. Objects are retained to preserve older enclosure downloads, so storage grows as new episodes arrive; `FEED_MAX_ITEMS` limits the RSS window, not stored file retention.
 
 These are planning estimates for the original single source, not an account bill or a promise for unlimited sources. The main recurring schedule still uses 288 initial messages/day. Secondary sources only consume refresh/preparation messages when requested: ten continuously polled, unchanged sources checked every 30 minutes would add about 480 initial messages/day; sources nobody requests add none. Initial 200-episode preparation can add about 25 messages per source. The shared 500-enqueue daily cap bounds secondary work across refreshes and preparation, with retries additional; a busy first day can defer some preparation until new requests arrive after the reset. Metadata commands and function work grow with distinct active sources. Client polling varies; gzip, CDN reuse and validators reduce Redis bandwidth. Check account-wide usage after rollout. No plan upgrade is required by this change. Prices verified 2026-09-05, QStash rechecked 2026-09-07: [Upstash Redis](https://upstash.com/pricing/redis), [QStash](https://upstash.com/pricing/qstash), [Vercel cron limits](https://vercel.com/docs/cron-jobs/usage-and-pricing).
 

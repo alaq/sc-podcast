@@ -170,7 +170,7 @@ def queue_work(config, store, feed, batches=25, session=requests):
         return False
     key = store.key(feed, "queued-work")
     token = secrets.token_hex(16)
-    if store.command("SET", key, token, "NX", "EX", 180) != "OK":
+    if store.command("SET", key, token, "NX", "EX", max(180, config.budget_seconds + 60)) != "OK":
         return False
     try:
         # Retain the existing key across rollout; now covers all on-demand work.
@@ -184,7 +184,7 @@ def queue_work(config, store, feed, batches=25, session=requests):
         endpoint = (os.environ.get("QSTASH_URL") or "https://qstash.upstash.io").rstrip("/")
         with session.post(endpoint + "/v2/publish/" + config.sync_url,
                           headers={"Authorization": "Bearer " + config.qstash_token, "Content-Type": "application/json",
-                                   "Upstash-Method": "POST", "Upstash-Retries": "2", "Upstash-Timeout": "60s", "Upstash-Delay": "2s"},
+                                   "Upstash-Method": "POST", "Upstash-Retries": "2", "Upstash-Timeout": f"{max(60, config.budget_seconds + 20)}s", "Upstash-Delay": "2s"},
                           json={"feed": feed, "bootstrap": batches, "job_token": token},
                           timeout=(0.5, 1.5), allow_redirects=False) as response:
             if not 200 <= response.status_code < 300:
