@@ -33,7 +33,7 @@ def schedule(config, store, feed, action, client=None, shared=False):
         if not shared and (not store.manifest(feed) or not store.state(feed).get("rollout_ready")):
             raise ValueError("Publish and verify the initial snapshot before enabling its schedule")
         client.schedule.create(destination=config.sync_url, cron="*/5 * * * *", body=json.dumps({"tick": True} if shared else {"feed": feed}),
-                               content_type="application/json", method="POST", retries=2, timeout="60s", schedule_id=ident)
+                               content_type="application/json", method="POST", retries=2, timeout=f"{max(60, config.budget_seconds + 20)}s", schedule_id=ident)
     elif action == "pause":
         client.schedule.pause(ident)
     value = client.schedule.get(ident)

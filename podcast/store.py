@@ -27,7 +27,21 @@ def unpack(value):
 
 PUBLISH = """
 if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
-for i = 2, #KEYS do redis.call('SET', KEYS[i], ARGV[i]) end
+for i = 2, #KEYS do
+  local value = ARGV[i]
+  if string.find(KEYS[i], ':track-path:', 1, true) then
+    local track = cjson.decode(value)
+    local old = redis.call('GET', KEYS[i])
+    if old and (not track.hosted_key or track.hosted_key == cjson.null) then
+      old = cjson.decode(old)
+      if old.id == track.id and old.hosted_key and old.hosted_key ~= cjson.null then
+        track.hosted_key = old.hosted_key
+        value = cjson.encode(track)
+      end
+    end
+  end
+  redis.call('SET', KEYS[i], value)
+end
 return 1
 """
 RELEASE = """
@@ -94,7 +108,7 @@ class Store:
 
     def acquire(self, feed):
         token = secrets.token_hex(24)
-        return token if self.command("SET", self.key(feed, "lock"), token, "NX", "EX", 120) == "OK" else None
+        return token if self.command("SET", self.key(feed, "lock"), token, "NX", "EX", max(120, self.config.budget_seconds + 60)) == "OK" else None
 
     def release(self, feed, token):
         return self.command("EVAL", RELEASE, 1, self.key(feed, "lock"), token)
@@ -107,7 +121,7 @@ class Store:
             values[self.key(feed, "manifest")] = compact(manifest)
         values.update(bodies or {})
         for track in tracks:
-            values[self.track_key(track["enclosure_path"])] = compact({k: track.get(k) for k in ("id", "webpage_url", "progressive_url", "hls_url", "duration", "length", "audio_type")})
+            values[self.track_key(track["enclosure_path"])] = compact({k: track.get(k) for k in ("id", "webpage_url", "progressive_url", "hls_url", "duration", "length", "audio_type", "hosted_key")})
         keys = [self.key(feed, "lock"), *values]
         if self.command("EVAL", PUBLISH, len(keys), *keys, token, *values.values()) != 1:
             raise StorageError("Sync lock expired; publication cancelled")

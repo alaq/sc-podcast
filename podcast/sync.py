@@ -19,9 +19,11 @@ def ready_entries(state, limit):
                   key=lambda x: (x.get("liked_at", 0), x["id"]), reverse=True)[:limit]
 
 
-def needs_audio(track):
+def needs_audio(track, hosted=False):
     # Replace synthetic M4A metadata with the external resource's MIME/length,
     # including retained episodes beyond the latest SoundCloud listing.
+    if hosted:
+        return not track.get("length") or track.get("audio_format_version") != 4
     return (not track.get("length") or track.get("audio_format_version") != 3
             or (track.get("hls_url") and not track.get("progressive_url")
                 and track.get("audio_type") not in HLS_TYPES))
@@ -67,6 +69,9 @@ class Synchronizer:
         source_deadline = getattr(self.source, "deadline", None)
         deadline = deadline if deadline is not None else self.monotonic() + self.config.budget_seconds
         now = int(self.clock())
+        hosted = self.config.hosts_audio(feed)
+        version = 4 if hosted else 3
+        hosting = None
         try:
             if initial and self.store.manifest(feed):
                 return {"state": "already_published", "feed": feed}
@@ -75,7 +80,7 @@ class Synchronizer:
             signature = digest({"entries": head["entries"], "title": head["title"], "image": head.get("image")})
             retry_due = status.get("retry_at", 0) and status["retry_at"] <= now
             if (signature == status.get("head_signature") and not retry_due and not status.get("has_more")
-                    and status.get("audio_format_version") == 3):
+                    and status.get("audio_format_version") == version):
                 status.update(last_checked_at=now, last_success_at=now, error=None)
                 self.store.commit(feed, token, status)
                 return {"state": "unchanged", "feed": feed, "count": status.get("published_count", 0)}
@@ -123,6 +128,8 @@ class Synchronizer:
                     merged["published_at"] = epoch(legacy_dates.get(entry["id"])) or entry.get("liked_at") or now
                 if entry.get("hls_url") and not old.get("hls_url"):
                     merged["retry_at"] = 0  # New support should not inherit the MP3-only backoff.
+                if hosted and old.get("audio_format_version") != version and old.get("preparation_version") != version:
+                    merged["retry_at"] = 0  # Give the new hosting path one immediate attempt.
                 if old != merged:
                     state["tracks"][entry["id"]] = merged
                     changed.append(merged)
@@ -142,8 +149,10 @@ class Synchronizer:
                     break
                 if initial and len(ready_entries(state, self.config.max_items)) >= min(5, self.config.max_items):
                     break
-                if not needs_audio(track) or track.get("retry_at", 0) > now:
+                if not needs_audio(track, hosted) or track.get("retry_at", 0) > now:
                     continue
+                if initial and hosted and not track.get("progressive_url"):
+                    continue  # File preparation belongs to a background job.
                 if initial and not (track.get("progressive_url") or track.get("hls_url")):
                     continue  # Leave slower fallback resolution to the background worker.
                 # Retain all discovered metadata, but prepare only the useful window.
@@ -155,8 +164,17 @@ class Synchronizer:
                     if hasattr(self.source, "deadline"):
                         self.source.deadline = min(source_deadline or float("inf"), deadline - (0.5 if initial else 5))
                         self.source.ydl.deadline = self.source.deadline
-                    audio = self.source.resolve_audio(track)
-                    track.update(length=audio["length"], audio_type=audio["type"], audio_format_version=3, prepared_at=now, retry_at=0, error=None)
+                    if hosted and not initial:
+                        from podcast.hosting import R2Audio
+                        hosting = hosting or R2Audio(self.config)
+                        audio = hosting.prepare(track, self.source, deadline - 8)
+                    else:
+                        audio = self.source.resolve_audio(track)
+                        if hosted and audio["type"] in HLS_TYPES:
+                            raise SourceDeadline("Audio file preparation requires a background job")
+                    track.update(length=audio["length"], audio_type=audio["type"], audio_format_version=version, prepared_at=now, retry_at=0, error=None)
+                    if audio.get("delivery") == "r2":
+                        track["hosted_key"] = audio["key"]
                     prepared.append(track)
                     ttl = max(0, min(120, audio.get("expires_at", 0) - now - 30))
                     try:
@@ -167,14 +185,15 @@ class Synchronizer:
                     break  # Publish completed episodes without marking the next one unavailable.
                 except SourceError:
                     count = track.get("attempts", 0) + 1
-                    track.update(attempts=count, retry_at=now + min(21600, 900 * 2 ** min(count - 1, 5)), error="audio_unavailable")
-            remaining = [x for x in ordered if needs_audio(x)]
+                    track.update(attempts=count, retry_at=now + min(21600, 900 * 2 ** min(count - 1, 5)),
+                                 preparation_version=version, error="audio_unavailable")
+            remaining = [x for x in ordered if needs_audio(x, hosted)]
             ready = ready_entries(state, self.config.max_items)
             eligible = remaining if len(ready) < self.config.max_items else [x for x in remaining if (x.get("liked_at", 0), x["id"]) >= (ready[-1].get("liked_at", 0), ready[-1]["id"])]
             retry_at = min((x.get("retry_at") or now for x in eligible), default=0)
             status.update(retry_at=retry_at, has_more=bool(pending or (len(ready) + sum(not x.get("attempts") for x in remaining) < self.config.max_items and state.get("backfill_cursor"))),
                           discovered_count=len(state["tracks"]), ready_count=len(ready), repair_pending_count=sum(bool(x.get("length")) for x in eligible), unavailable_count=sum(bool(x.get("attempts")) for x in eligible),
-                          rollout_ready=state.get("rollout_ready", False), last_success_at=now, audio_format_version=3)
+                          rollout_ready=state.get("rollout_ready", False), last_success_at=now, audio_format_version=version)
             manifest, bodies, retired = None, {}, []
             if publish and state.get("rollout_ready"):
                 manifest, bodies, retired = build_snapshot(self.store, self.config, feed, state, self.store.manifest(feed), now)
@@ -196,6 +215,8 @@ class Synchronizer:
                 pass
             raise
         finally:
+            if hosting:
+                hosting.close()
             if hasattr(self.source, "deadline"):
                 self.source.deadline = source_deadline
                 self.source.ydl.deadline = source_deadline

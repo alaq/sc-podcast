@@ -148,6 +148,18 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) != 2 or any(not p or p in (".", "..") or any(c in p for c in "?#\\\r\n") for p in parts):
             self.reply(404, b"Unknown track.", headers={"Cache-Control": "no-store"})
             return
+        track = None
+        if config.r2_bucket:
+            track = store.track(track_path)
+            if track and track.get("hosted_key"):
+                from podcast.hosting import R2Audio
+                hosting = R2Audio(config)
+                try:
+                    url = hosting.link(track["hosted_key"], self.command)
+                finally:
+                    hosting.close()
+                self.reply(302, headers={"Location": url, "Cache-Control": "no-store"})
+                return
         now = int(time.time())
         try:
             audio = store.audio(track_path)
@@ -156,7 +168,7 @@ class Handler(BaseHTTPRequestHandler):
         if (not audio or not audio.get("url") or audio.get("delivery") == "hls-m4a"
                 or audio.get("expires_at", 0) <= now + 30):
             try:
-                track = store.track(track_path)
+                track = track or store.track(track_path)
             except StorageError:
                 track = None
             track = track or {"webpage_url": "https://soundcloud.com/" + quote(track_path, safe="/")}
@@ -170,8 +182,8 @@ class Handler(BaseHTTPRequestHandler):
                 store.cache_audio(track_path, audio, ttl)
             except StorageError:
                 pass
-        # Audio bytes belong to SoundCloud. GET, HEAD and range requests all
-        # receive an empty redirect; never proxy or assemble media here.
+        # Listener requests always receive an empty redirect. Preparation and
+        # object uploads happen only in authenticated background sync jobs.
         self.reply(302, headers={"Location": audio["url"], "Cache-Control": "no-store"})
 
     def about(self, config, store, base, as_json):

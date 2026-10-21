@@ -49,6 +49,16 @@ class Config:
     max_auto_feeds: int = 50
     auto_refresh_seconds: int = 1800
     queue_enabled: bool = True
+    r2_account_id: str = ""
+    r2_access_key: str = ""
+    r2_secret_key: str = ""
+    r2_bucket: str = ""
+    r2_public_base: str = ""
+    r2_prefix: str = "audio-v1"
+    r2_feeds: tuple = (DEFAULT_FEED,)
+
+    def hosts_audio(self, feed):
+        return bool(self.r2_bucket and feed in self.r2_feeds)
 
     @classmethod
     def from_env(cls):
@@ -80,11 +90,18 @@ class Config:
             sync_url=os.environ.get("SYNC_URL", bases[0] + "/api/sync"),
             qstash_token=os.environ.get("QSTASH_TOKEN", ""),
             max_audio=max(1, min(30, int(os.environ.get("MAX_AUDIO_PREPARATIONS", "8")))),
-            budget_seconds=max(5, min(45, int(os.environ.get("SYNC_BUDGET_SECONDS", "40")))),
+            budget_seconds=max(5, min(240, int(os.environ.get("SYNC_BUDGET_SECONDS", "40")))),
             ping_overcast=os.environ.get("PING_OVERCAST") == "1" and os.environ.get("VERCEL_ENV") != "preview",
             max_auto_feeds=max(1, min(500, int(os.environ.get("MAX_AUTO_FEEDS", "50")))),
             auto_refresh_seconds=max(300, int(os.environ.get("AUTO_REFRESH_SECONDS", "1800"))),
             queue_enabled=os.environ.get("VERCEL_ENV") != "preview",
+            r2_account_id=os.environ.get("R2_ACCOUNT_ID", ""),
+            r2_access_key=os.environ.get("R2_ACCESS_KEY_ID", ""),
+            r2_secret_key=os.environ.get("R2_SECRET_ACCESS_KEY", ""),
+            r2_bucket=os.environ.get("R2_BUCKET", ""),
+            r2_public_base=os.environ.get("R2_PUBLIC_BASE_URL", "").rstrip("/"),
+            r2_prefix=os.environ.get("R2_AUDIO_PREFIX", "audio-v1") + ("/preview" if os.environ.get("VERCEL_ENV") == "preview" else ""),
+            r2_feeds=tuple(normalize_feed(x.strip()) for x in os.environ.get("R2_FEEDS", DEFAULT_FEED).split(",") if x.strip()),
         )
 
     def base_for_host(self, host):
